@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<title>prototype</title>
+<style>
+  html,body{margin:0;height:100%;background:#111;overflow:hidden;touch-action:none}
+  canvas{display:block;width:100%;height:100%;image-rendering:pixelated}
+</style>
+<canvas id=c></canvas>
+<script>
+const c = document.getElementById('c'), x = c.getContext('2d')
+let W, H
+onresize = () => { W = c.width = innerWidth; H = c.height = innerHeight }
+onresize()
+
+// input: keys held, and last pointer position
+const k = {}
+onkeydown = e => k[e.key] = 1
+onkeyup = e => k[e.key] = 0
+const p = { x: 0, y: 0, down: 0 }
+onpointermove = e => { p.x = e.clientX; p.y = e.clientY }
+onpointerdown = e => { p.down = 1; p.x = e.clientX; p.y = e.clientY }
+onpointerup = () => p.down = 0
+
+// game state
+let t = 0
+
+function update(dt) {
+  t += dt
+}
+
+function draw() {
+  x.fillStyle = '#111'
+  x.fillRect(0, 0, W, H)
+
+  x.fillStyle = `hsl(${t * 60 % 360} 90% 60%)`
+  x.beginPath()
+  x.arc(W / 2 + Math.cos(t) * 100, H / 2 + Math.sin(t * 1.3) * 60, 20, 0, 7)
+  x.fill()
+}
+
+let last = 0
+requestAnimationFrame(function loop(now) {
+  requestAnimationFrame(loop)
+  const dt = Math.min((now - last) / 1000, 0.05)
+  last = now
+  update(dt)
+  draw()
+})
+</script>
+</html>
