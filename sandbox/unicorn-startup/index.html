@@ -1,0 +1,1097 @@
+<!DOCTYPE html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<title>UNICORN.exe</title>
+<style>
+  html,body{margin:0;height:100%;background:#07060f;overflow:hidden;touch-action:none;
+    -webkit-user-select:none;user-select:none;cursor:default}
+  canvas{display:block;width:100%;height:100%}
+</style>
+<canvas id=c></canvas>
+<script>
+"use strict";
+/* ==========================================================================
+   UNICORN.exe — the other kind of unicorn.
+   Real-time startup sim. Runway burns. You triage cards. The rainbow is your
+   growth chart. Reach a $1B valuation before the money runs out.
+   ========================================================================== */
+
+const c = document.getElementById('c');
+const X = c.getContext('2d');
+const UI = 'system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif';
+const MONO = 'ui-monospace,SFMono-Regular,Menlo,Consolas,monospace';
+const GOAL = 1000;                  // $1000M == $1B
+const BEST_KEY = 'unicorn-startup.best';
+
+let W = 0, H = 0, DPR = 1, S = 1;   // S = ui scale
+
+/* ---------------------------------------------------------------- helpers */
+const rnd = (a, b) => a + Math.random() * (b - a);
+const rint = (a, b) => Math.floor(rnd(a, b + 1));
+const pick = a => a[Math.floor(Math.random() * a.length)];
+const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
+const lerp = (a, b, t) => a + (b - a) * t;
+const A = s => s.split('|');
+
+function fmt(v) {
+  if (v >= 1000) return '$' + (v / 1000).toFixed(2) + 'B';
+  if (v >= 100) return '$' + v.toFixed(0) + 'M';
+  if (v >= 1) return '$' + v.toFixed(1) + 'M';
+  return '$' + Math.max(0, v * 1000).toFixed(0) + 'k';
+}
+function txt(s, x, y, size, col, align, weight, font) {
+  X.fillStyle = col;
+  X.textAlign = align || 'left';
+  X.textBaseline = 'alphabetic';
+  X.font = (weight || 600) + ' ' + size + 'px ' + (font || UI);
+  X.fillText(s, x, y);
+}
+function rrect(x, y, w, h, r) {
+  r = Math.min(r, w / 2, h / 2);
+  X.beginPath();
+  X.moveTo(x + r, y);
+  X.arcTo(x + w, y, x + w, y + h, r);
+  X.arcTo(x + w, y + h, x, y + h, r);
+  X.arcTo(x, y + h, x, y, r);
+  X.arcTo(x, y, x + w, y, r);
+  X.closePath();
+}
+function wrap(s, maxW, size, weight) {
+  X.font = (weight || 600) + ' ' + size + 'px ' + UI;
+  const words = s.split(' ');
+  const lines = [];
+  let cur = '';
+  for (const w of words) {
+    const test = cur ? cur + ' ' + w : w;
+    if (X.measureText(test).width > maxW && cur) { lines.push(cur); cur = w; }
+    else cur = test;
+  }
+  if (cur) lines.push(cur);
+  return lines;
+}
+
+/* ------------------------------------------------------------------ audio */
+let AC = null, noiseBuf = null, muted = false;
+function ac() {
+  if (!AC) { try { AC = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { AC = 0; } }
+  if (AC && AC.state === 'suspended') AC.resume();
+  return AC || null;
+}
+function tone(f, d, type, vol, slide, delay) {
+  if (muted) return;
+  const a = ac(); if (!a) return;
+  const t = a.currentTime + (delay || 0);
+  const o = a.createOscillator(), g = a.createGain();
+  o.type = type || 'square';
+  o.frequency.setValueAtTime(f, t);
+  if (slide) o.frequency.exponentialRampToValueAtTime(Math.max(25, f * slide), t + d);
+  g.gain.setValueAtTime(0.0001, t);
+  g.gain.exponentialRampToValueAtTime(vol || 0.1, t + 0.012);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + d);
+  o.connect(g); g.connect(a.destination);
+  o.start(t); o.stop(t + d + 0.05);
+}
+function noise(d, vol, filt) {
+  if (muted) return;
+  const a = ac(); if (!a) return;
+  if (!noiseBuf) {
+    noiseBuf = a.createBuffer(1, a.sampleRate * 0.7, a.sampleRate);
+    const dd = noiseBuf.getChannelData(0);
+    for (let i = 0; i < dd.length; i++) dd[i] = Math.random() * 2 - 1;
+  }
+  const t = a.currentTime;
+  const s = a.createBufferSource(); s.buffer = noiseBuf;
+  const g = a.createGain(), f = a.createBiquadFilter();
+  f.type = 'lowpass';
+  f.frequency.setValueAtTime(filt || 1200, t);
+  f.frequency.exponentialRampToValueAtTime(90, t + d);
+  g.gain.setValueAtTime(vol || 0.18, t);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + d);
+  s.connect(f); f.connect(g); g.connect(a.destination);
+  s.start(t); s.stop(t + d + 0.02);
+}
+const SFX = {
+  ship:  () => { tone(660, .09, 'square', .09, 2.2); tone(990, .07, 'square', .05, 1.6, .05); },
+  hire:  () => { tone(220, .12, 'sawtooth', .08, 1.9); tone(330, .1, 'triangle', .06, 1.5, .06); },
+  tweet: () => { tone(880, .06, 'sine', .1, 1.9); tone(1320, .06, 'sine', .07, 1.9, .05); tone(1760, .08, 'sine', .05, 1.4, .1); },
+  pivot: () => { tone(300, .28, 'sawtooth', .1, 3.2); noise(.16, .07, 700); },
+  raise: () => { [523, 659, 784, 1046].forEach((f, i) => tone(f, .16, 'triangle', .1, 1, i * .05)); },
+  fix:   () => { tone(160, .14, 'square', .09, .55); },
+  bad:   () => { noise(.35, .22, 800); tone(120, .35, 'sawtooth', .1, .4); },
+  deny:  () => { tone(150, .07, 'square', .08, .7); tone(110, .07, 'square', .08, .7, .07); },
+  mile:  () => { [659, 880, 1318].forEach((f, i) => tone(f, .22, 'triangle', .1, 1, i * .06)); },
+  die:   () => { [440, 349, 262, 175].forEach((f, i) => tone(f, .4, 'sawtooth', .11, .6, i * .13)); noise(.9, .13, 500); },
+  win:   () => { [523, 659, 784, 1046, 1318, 1568, 2093].forEach((f, i) => tone(f, .4, 'triangle', .11, 1, i * .08)); },
+  start: () => { [392, 523, 659].forEach((f, i) => tone(f, .18, 'square', .08, 1, i * .06)); }
+};
+
+/* ------------------------------------------------------- procedural words */
+const NAME_A = A('Zap|Vibe|Glim|Nyx|Prax|Loop|Quor|Hux|Vela|Brix|Snor|Flux|Wisp|Ozy|Trell|Gribb|Plum|Krel|Dandi|Yolo');
+const NAME_B = A('ly|io|r|ify|base|labs|AI|dex|hq|scale|core|wise|flow|zen|works|.dev|Ø|zz');
+const TAGLINE = A(
+  'the operating system for everything|we are a data company that happens to sell socks|' +
+  'making the world more open and monetised|AI-first, revenue-later|' +
+  'the last app you will ever download|infrastructure for the creator middle class|' +
+  'we index vibes|category-defining, category to be defined|' +
+  'a platform for platforms|reimagining the space of reimagining');
+
+const ADJ = A('AI-powered|agentic|blockchain-backed|real-time|zero-click|LLM-native|serverless|vibe-coded|quantum-adjacent|federated|edge-first|self-healing|frictionless|carbon-negative|end-to-end|opinionated');
+const FEAT = A('onboarding funnel|checkout flow|referral loop|admin panel|notification centre|search bar|dashboard|mobile app|chat widget|paywall|dark mode|settings page|API v2|analytics tab|magic link|changelog');
+const ROLE = A('growth hackers|prompt engineers|ex-FAANG staff engineers|forward-deployed engineers|a Chief Vibes Officer|an AI ethicist|unpaid interns|a Head of Storytelling|six SDRs|a Founding Designer|solutions architects|a VP of Culture|a full-stack cofounder');
+const TW = A('we are just getting started|burn is a feature, not a bug|we deleted the roadmap|hiring for 40 roles|day one energy|there is no such thing as a bad round|we hire builders, not employees|the future is unevenly distributed|we have no competitors, only students|shipping beats sleeping|our interns out-ship your seniors|revenue is a vanity metric|we are pre-revenue, post-narrative');
+const PIV_A = A('Uber for|Airbnb for|Notion for|an LLM for|a marketplace for|Stripe for|a social network for|Duolingo for|a dating app for|a browser for|Figma for|a subscription box for');
+const PIV_B = A('dentists|forklifts|grief|B2B fungi|regulatory filings|childcare|cattle|goldfish|nuclear waste|HR|toddlers|shipping containers|the afterlife|beekeepers|parking|divorce');
+const STAGE = A('pre-seed extension|seed|seed-2|pre-A|Series A|Series A-1|bridge|party round|uncapped SAFE|strategic round|Series A prime|inside round');
+const VC = A('Sequential Capital|Andreessen Hazelwood|Y Combinatorial|Tiger Adjacent|SoftBonk|a family office|Founders Fond|Lightspeeed|a crypto whale|your uncle|Index Adjacent|General Vibes');
+const WHO = A('Your CTO|Your first engineer|Your Head of Growth|Your only designer|The Chief Vibes Officer|Your cofounder|Your solo SRE|Your Head of Trust');
+const SLUR = A('a wrapper|vapourware|a rebranded spreadsheet|three interns in a trenchcoat|not actually AI|a Notion template|structurally unprofitable|a very expensive cron job');
+const FIXV = A('Throw money at it|Handle it|Make it go away|Deal with it|Absorb the hit|Quietly settle|Spin it');
+const EPITAPH = A(
+  'The domain is for sale.|Acquihired for the office plants.|' +
+  'The Slack is archived. The vibes are not.|Your board deck is now a meme.|' +
+  'Assets sold to a competitor for $1 and a hug.|A post-mortem blog post got more traffic than the product.|' +
+  'The AWS bill outlived the company.|You returned the capital. Some of it.');
+
+const startupName = () => pick(NAME_A) + pick(NAME_B);
+
+/* ------------------------------------------------------------------ state */
+let state = 'title';           // title | play | over | win
+let G = null;
+let best = 0;
+try { best = parseFloat(localStorage.getItem(BEST_KEY)) || 0; } catch (e) { best = 0; }
+
+let shake = 0, flash = 0, flashCol = '#fff', freeze = 0, tGlobal = 0;
+let particles = [], toasts = [];
+const keys = {};
+let pushKey = 0, pushPtr = 0;
+const ptr = { x: -999, y: -999, down: 0 };
+
+function newGame() {
+  G = {
+    t: 0,
+    name: startupName(),
+    tagline: pick(TAGLINE),
+    cash: 12,            // $M in the bank
+    trac: 1.0,           // fundamental traction ($M)
+    val: 1.0,            // valuation ($M), eased
+    valTarget: 1.0,
+    peak: 1.0,
+    hype: 0.55,          // 0..1.6
+    staff: 3,
+    burn: 0.3,
+    burnMul: 1,
+    grow: 0,
+    market: 1,
+    mom: 0,              // momentum 0..1
+    pushAmt: 0,
+    pivotBonus: 1,
+    raises: 0,
+    pityT: 0,
+    backlash: 0,
+    played: 0,
+    slots: [null, null, null, null],
+    cd: [0.1, 0.45, 0.85, 1.25],
+    hist: [1.0],
+    histT: 0,
+    histStep: 0.06,
+    mile: 0,
+    valPop: 0,
+    dead: '',
+    score: 0,
+    speedBonus: 0
+  };
+  particles = []; toasts = [];
+  shake = 0; flash = 0; freeze = 0;
+}
+
+/* ------------------------------------------------------------------ cards */
+const TYPES = {
+  ship:  { col: '#3fe8ff', tag: 'SHIP' },
+  hire:  { col: '#7dff5b', tag: 'HIRE' },
+  tweet: { col: '#ff5bd6', tag: 'POST' },
+  pivot: { col: '#ffb23f', tag: 'PIVOT' },
+  raise: { col: '#ffe45b', tag: 'RAISE' },
+  crisis:{ col: '#ff4b62', tag: 'CRISIS' }
+};
+
+function costScale() { return 1 + G.val / 22; }
+
+// What one SHIP is currently worth. Momentum, team, pivots and hype all just
+// multiply this — which is what bends the curve upward instead of straight.
+function shipMul() {
+  return (1 + G.mom * 0.8) * G.pivotBonus * (0.9 + G.staff * 0.013) * (0.55 + G.hype * 0.55);
+}
+
+function makeCard(type) {
+  const cd = { type: type, played: 0, anim: 0, hot: 0 };
+  const cs = costScale();
+  if (type === 'ship') {
+    cd.title = 'Ship the ' + pick(ADJ) + ' ' + pick(FEAT);
+    const boost = rnd(0.10, 0.17);
+    cd.boost = boost;
+    cd.sub = '';   // filled in live at draw time — it grows as you do
+    cd.cost = rnd(0.35, 0.6) * cs;
+    cd.life = rnd(4.2, 6.0);
+  } else if (type === 'hire') {
+    const n = rint(2, 6);
+    cd.n = n;
+    cd.title = 'Hire ' + (Math.random() < .45 ? '' : n + ' ') + pick(ROLE);
+    cd.sub = '+' + n + ' headcount  ·  burn up';
+    cd.cost = (0.7 + n * 0.22) * cs;
+    cd.life = rnd(4.5, 6.5);
+  } else if (type === 'tweet') {
+    cd.title = '"' + pick(TW) + '"';
+    cd.hypeGain = rnd(0.20, 0.34);
+    cd.sub = 'free  ·  big hype  ·  invites heat';
+    cd.cost = 0;
+    cd.life = rnd(3.2, 4.6);
+  } else if (type === 'pivot') {
+    cd.title = 'Pivot: ' + pick(PIV_A) + ' ' + pick(PIV_B);
+    cd.sub = '-30% traction  ·  growth x1.3  ·  +hype';
+    cd.cost = rnd(0.2, 0.5) * cs;
+    cd.life = rnd(4.0, 5.5);
+  } else if (type === 'raise') {
+    const amt = (4 + G.t * 0.12 + G.val * 0.14 * (0.4 + G.hype)) * Math.pow(0.985, G.raises);
+    cd.amt = amt;
+    cd.title = 'Close the ' + pick(STAGE) + ' from ' + pick(VC);
+    cd.sub = '+' + fmt(amt) + ' runway  ·  hype down  ·  burn up';
+    cd.cost = 0;
+    cd.life = rnd(3.4, 4.8);
+  } else {
+    const r = Math.random();
+    const sev = 0.6 + G.t / 90;
+    if (r < 0.17) cd.title = pick(WHO) + ' is leaving to start a competitor';
+    else if (r < 0.34) cd.title = 'AWS bill: $' + rint(40, 900) + 'k, due now';
+    else if (r < 0.48) cd.title = 'TechCrunch: "' + G.name + ' is ' + pick(SLUR) + '"';
+    else if (r < 0.60) cd.title = 'Data breach: ' + rint(3, 400) + 'k users, all of them yours';
+    else if (r < 0.70) cd.title = 'The board wants a "quick sync" about burn';
+    else if (r < 0.79) cd.title = 'Compliance: you need SOC 2. Yesterday.';
+    else if (r < 0.88) cd.title = 'Your biggest customer churned into a competitor';
+    else cd.title = 'An intern open-sourced the entire codebase';
+    cd.dmgCash = rnd(1.1, 2.2) * sev * (0.55 + G.val / 75);
+    cd.dmgHype = rnd(0.16, 0.3);
+    cd.cost = cd.dmgCash * 0.42;
+    cd.sub = pick(FIXV) + '  ·  or eat ' + fmt(cd.dmgCash) + ' + hype';
+    cd.life = rnd(3.4, 4.6);
+  }
+  cd.life *= clamp(1 - G.t / 220, 0.55, 1);
+  cd.maxLife = cd.life;
+  return cd;
+}
+
+function dealWeights() {
+  const t = G.t;
+  const runway = G.cash / Math.max(G.burn, 0.01);
+  const hasRaise = G.slots.some(s => s && s.type === 'raise' && !s.played);
+  if (runway < 9 && !hasRaise && G.pityT <= 0) {      // pity bridge round
+    G.pityT = 7;
+    return 'raise';
+  }
+  const crisis = clamp(0.10 + t / 260 + G.backlash * 0.018, 0, 0.40);
+  const crisisCount = G.slots.filter(s => s && s.type === 'crisis' && !s.played).length;
+  const w = [
+    ['ship', 0.30],
+    ['hire', 0.19],
+    ['tweet', 0.14],
+    ['pivot', 0.09],
+    ['raise', runway < 20 ? 0.20 : 0.08],
+    ['crisis', crisisCount >= 2 ? 0 : crisis]
+  ];
+  let tot = 0; for (const e of w) tot += e[1];
+  let r = Math.random() * tot;
+  for (const e of w) { r -= e[1]; if (r <= 0) return e[0]; }
+  return 'ship';
+}
+
+/* --------------------------------------------------------------- feedback */
+function burst(x, y, col, n, spd, life) {
+  for (let i = 0; i < n; i++) {
+    const a = Math.random() * 6.283, s = rnd(spd * 0.3, spd);
+    particles.push({
+      x: x, y: y, vx: Math.cos(a) * s, vy: Math.sin(a) * s - spd * 0.3,
+      life: life || rnd(0.4, 0.9), max: life || 0.9, col: col,
+      r: rnd(1.5, 4.2), g: 420, txt: 0
+    });
+  }
+}
+function confetti(x, y, n) {
+  for (let i = 0; i < n; i++) {
+    const a = Math.random() * 6.283, s = rnd(60, 620);
+    particles.push({
+      x: x, y: y, vx: Math.cos(a) * s, vy: Math.sin(a) * s - 200,
+      life: rnd(1.2, 2.6), max: 2.6, col: 'hsl(' + (Math.random() * 360 | 0) + ' 100% 62%)',
+      r: rnd(2, 6), g: 500, txt: 0
+    });
+  }
+}
+function fly(s, x, y, col) {
+  particles.push({ x: x, y: y, vx: rnd(-24, 24), vy: -70, life: 1.1, max: 1.1, col: col, r: 0, g: 30, txt: s });
+}
+function toast(s, col) {
+  toasts.push({ s: s, col: col, life: 2.4 });
+  if (toasts.length > 4) toasts.shift();
+}
+
+/* ------------------------------------------------------------------- play */
+function cardRect(i) {
+  const n = 4;
+  const pad = 10 * S;
+  const totalW = W - pad * 2;
+  const cw = (totalW - pad * (n - 1)) / n;
+  const ch = LY.cardH;
+  return { x: pad + i * (cw + pad), y: H - ch - pad, w: cw, h: ch };
+}
+
+function playCard(i) {
+  if (state !== 'play') return;
+  const cd = G.slots[i];
+  if (!cd || cd.played) return;
+  const r = cardRect(i);
+  const cx = r.x + r.w / 2, cy = r.y + r.h / 2;
+  const col = TYPES[cd.type].col;
+
+  if (cd.cost > G.cash) {
+    SFX.deny();
+    cd.hot = 1;
+    shake = Math.max(shake, 4);
+    fly('NO CASH', cx, cy - 10, '#ff4b62');
+    return;
+  }
+  G.cash -= cd.cost;
+  G.played++;
+  G.mom = clamp(G.mom + 0.22, 0, 1);
+  freeze = Math.max(freeze, 0.045);
+  burst(cx, cy, col, 16, 320);
+  cd.played = 1; cd.anim = 0;
+
+  if (cd.type === 'ship') {
+    const m = 1 + cd.boost * shipMul();
+    G.trac *= m;
+    G.hype = clamp(G.hype + 0.05, 0, 1.6);
+    fly('+' + ((m - 1) * 100 | 0) + '% TRACTION', cx, cy - 20, col);
+    SFX.ship(); shake = Math.max(shake, 5);
+  } else if (cd.type === 'hire') {
+    G.staff += cd.n;
+    G.hype = clamp(G.hype + 0.02, 0, 1.6);
+    fly('+' + cd.n + ' HEADCOUNT', cx, cy - 20, col);
+    SFX.hire(); shake = Math.max(shake, 4);
+  } else if (cd.type === 'tweet') {
+    G.hype = clamp(G.hype + cd.hypeGain * (1 + G.mom * 0.5), 0, 1.6);
+    G.backlash += 1;
+    fly('+HYPE', cx, cy - 20, col);
+    SFX.tweet(); shake = Math.max(shake, 6);
+  } else if (cd.type === 'pivot') {
+    G.trac *= 0.72;
+    G.pivotBonus = Math.min(2.4, G.pivotBonus * 1.20);
+    G.hype = clamp(G.hype + 0.22, 0, 1.6);
+    fly('GROWTH x' + G.pivotBonus.toFixed(1), cx, cy - 20, col);
+    SFX.pivot(); shake = Math.max(shake, 12);
+    flash = 0.4; flashCol = col;
+  } else if (cd.type === 'raise') {
+    G.cash += cd.amt;
+    G.raises++;
+    G.hype = clamp(G.hype - 0.17, 0, 1.6);
+    fly('+' + fmt(cd.amt), cx, cy - 20, col);
+    toast('Raised ' + fmt(cd.amt) + '. The bar is now higher.', col);
+    SFX.raise(); shake = Math.max(shake, 9);
+    flash = 0.3; flashCol = col;
+    confetti(cx, cy, 26);
+  } else {
+    fly('HANDLED  -' + fmt(cd.cost), cx, cy - 20, '#ff9aa7');
+    SFX.fix(); shake = Math.max(shake, 6);
+  }
+}
+
+function expireCard(i) {
+  const cd = G.slots[i];
+  const r = cardRect(i);
+  if (cd.type === 'crisis') {
+    G.cash -= cd.dmgCash;
+    G.hype = clamp(G.hype - cd.dmgHype, 0, 1.6);
+    G.mom = Math.max(0, G.mom - 0.4);
+    shake = Math.max(shake, 18);
+    flash = 0.55; flashCol = '#ff2a44';
+    freeze = Math.max(freeze, 0.09);
+    burst(r.x + r.w / 2, r.y + r.h / 2, '#ff4b62', 26, 420);
+    fly('-' + fmt(cd.dmgCash), r.x + r.w / 2, r.y - 4, '#ff4b62');
+    toast('Ignored: ' + cd.title, '#ff4b62');
+    SFX.bad();
+  }
+  G.slots[i] = null;
+  G.cd[i] = rnd(0.7, 1.4) * clamp(1 - G.t / 300, 0.55, 1);
+}
+
+/* ----------------------------------------------------------------- layout */
+const LY = { hudH: 0, cardH: 0, px: 0, py: 0, pw: 0, ph: 0 };
+function layout() {
+  S = clamp(Math.min(W / 940, H / 700), 0.62, 1.25);
+  LY.hudH = clamp(H * 0.20, 92, 148);
+  LY.cardH = clamp(H * 0.235, 108, 176);
+  LY.px = 52 * S;
+  LY.py = LY.hudH + 6 * S;
+  LY.pw = W - LY.px - 18 * S;
+  LY.ph = H - LY.py - LY.cardH - 26 * S;
+}
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = window.innerWidth; H = window.innerHeight;
+  c.width = Math.max(1, W * DPR | 0);
+  c.height = Math.max(1, H * DPR | 0);
+  c.style.width = W + 'px'; c.style.height = H + 'px';
+  X.setTransform(DPR, 0, 0, DPR, 0, 0);
+  layout();
+}
+window.addEventListener('resize', resize);
+
+/* ----------------------------------------------------------------- update */
+const LOG_LO = 0.35, LOG_HI = 1500;
+const logSpan = Math.log(LOG_HI / LOG_LO);
+function yv(v) {
+  const f = Math.log(clamp(v, LOG_LO, LOG_HI * 4) / LOG_LO) / logSpan;
+  return LY.py + LY.ph - f * LY.ph;
+}
+
+function update(dt) {
+  tGlobal += dt;
+  shake *= Math.pow(0.0016, dt);
+  flash = Math.max(0, flash - dt * 2.4);
+
+  // particles / toasts run on real time
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.life -= dt;
+    if (p.life <= 0) { particles.splice(i, 1); continue; }
+    p.x += p.vx * dt; p.y += p.vy * dt; p.vy += p.g * dt;
+    p.vx *= Math.pow(0.25, dt);
+  }
+  for (let i = toasts.length - 1; i >= 0; i--) {
+    toasts[i].life -= dt;
+    if (toasts[i].life <= 0) toasts.splice(i, 1);
+  }
+  if (state !== 'play') return;
+
+  if (freeze > 0) { freeze -= dt; return; }
+
+  G.t += dt;
+  const push = (pushKey || pushPtr) ? 1 : 0;
+  G.pushAmt += (push - G.pushAmt) * Math.min(1, dt * 9);
+  G.mom = Math.max(0, G.mom - dt * 0.38);
+  G.pityT = Math.max(0, G.pityT - dt);
+
+  // ---- money
+  G.burnMul = (1 + G.t / 70) * Math.pow(1.04, G.raises);
+  G.burn = (0.10 + G.staff * 0.018) * G.burnMul * (1 + G.pushAmt * 1.2);
+  G.cash -= G.burn * dt;
+
+  // ---- market mood
+  G.market = 1 + 0.42 * Math.sin(G.t * 0.29 + 0.7) + 0.22 * Math.sin(G.t * 0.81 + 2.1);
+
+  // ---- growth (exponential -> hockey stick)
+  G.grow = 0.013 * (0.5 + G.staff * 0.022) * (1 + G.mom * 0.55) *
+           (1 + G.pushAmt * 0.85) * G.pivotBonus * clamp(G.market, 0.35, 2) *
+           (0.4 + G.hype * 0.85);
+  G.trac *= Math.exp(G.grow * dt);
+
+  // ---- hype decays, always
+  G.hype -= (0.052 + G.hype * 0.05 + G.pushAmt * 0.055) * dt;
+  G.hype = clamp(G.hype, 0, 1.6);
+
+  // ---- valuation follows traction * narrative
+  G.valTarget = G.trac * (0.5 + G.hype * 1.5);
+  const before = G.val;
+  G.val += (G.valTarget - G.val) * Math.min(1, dt * 3.0);
+  if (G.val > before * 1.0035) G.valPop = Math.min(1, G.valPop + (G.val / before - 1) * 40);
+  G.valPop *= Math.pow(0.02, dt);
+  if (G.val > G.peak) G.peak = G.val;
+
+  // ---- history sampling
+  G.histT += dt;
+  while (G.histT >= G.histStep) {
+    G.histT -= G.histStep;
+    G.hist.push(G.val);
+    if (G.hist.length > 760) {
+      const h = [];
+      for (let i = 0; i < G.hist.length; i += 2) h.push(G.hist[i]);
+      G.hist = h; G.histStep *= 2;
+    }
+  }
+
+  // ---- milestones
+  const MS = [10, 50, 100, 250, 500, 750];
+  const LB = ['$10M — a seed deck with a chart',
+              '$50M — you are now "in the space"',
+              '$100M — nine-figure narrative',
+              '$250M — the term sheets find you',
+              '$500M — half a horn',
+              '$750M — do not look at the burn'];
+  while (G.mile < MS.length && G.val >= MS[G.mile]) {
+    toast(LB[G.mile], '#ffe45b');
+    SFX.mile();
+    shake = Math.max(shake, 10);
+    flash = 0.28; flashCol = '#ffe45b';
+    confetti(W / 2, LY.py + LY.ph * 0.4, 30);
+    G.mile++;
+  }
+
+  // ---- cards
+  for (let i = 0; i < 4; i++) {
+    const cd = G.slots[i];
+    if (!cd) {
+      G.cd[i] -= dt;
+      if (G.cd[i] <= 0) G.slots[i] = makeCard(dealWeights());
+      continue;
+    }
+    if (cd.played) {
+      cd.anim += dt * 3.4;
+      if (cd.anim >= 1) { G.slots[i] = null; G.cd[i] = rnd(0.6, 1.25) * clamp(1 - G.t / 300, 0.55, 1); }
+      continue;
+    }
+    cd.hot = Math.max(0, cd.hot - dt * 3);
+    cd.life -= dt;
+    if (cd.life <= 0) expireCard(i);
+  }
+
+  // ---- end states
+  if (G.val >= GOAL) {
+    state = 'win';
+    G.speedBonus = Math.round(30000 / Math.max(G.t, 12));
+    G.score = Math.round(G.peak) + G.speedBonus;
+    saveBest();
+    SFX.win();
+    shake = 26; flash = 0.9; flashCol = '#fff';
+    confetti(W / 2, H * 0.45, 340);
+  } else if (G.cash <= 0) {
+    G.cash = 0;
+    state = 'over';
+    G.dead = pick(EPITAPH);
+    G.score = Math.round(G.peak);
+    saveBest();
+    SFX.die();
+    shake = 24; flash = 0.7; flashCol = '#ff2a44';
+    burst(W / 2, H * 0.5, '#ff4b62', 70, 520, 1.4);
+  }
+}
+function saveBest() {
+  if (G.score > best) {
+    best = G.score;
+    try { localStorage.setItem(BEST_KEY, String(best)); } catch (e) {}
+  }
+}
+
+/* ------------------------------------------------------------------- draw */
+function drawBG() {
+  const g = X.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, '#0b0a1b');
+  g.addColorStop(1, '#05040c');
+  X.fillStyle = g;
+  X.fillRect(0, 0, W, H);
+  // slow rainbow aurora
+  X.globalAlpha = 0.10;
+  for (let i = 0; i < 6; i++) {
+    const y = H * 0.5 + Math.sin(tGlobal * 0.25 + i) * H * 0.28;
+    const gr = X.createRadialGradient(W * (0.1 + i * 0.17), y, 0, W * (0.1 + i * 0.17), y, W * 0.34);
+    gr.addColorStop(0, 'hsl(' + (i * 55 + tGlobal * 14) % 360 + ' 100% 60%)');
+    gr.addColorStop(1, 'rgba(0,0,0,0)');
+    X.fillStyle = gr;
+    X.fillRect(0, 0, W, H);
+  }
+  X.globalAlpha = 1;
+}
+
+function rainbowGrad(x0, x1) {
+  const g = X.createLinearGradient(x0, 0, x1, 0);
+  const hues = [280, 250, 200, 160, 90, 45, 12];
+  for (let i = 0; i < hues.length; i++)
+    g.addColorStop(i / (hues.length - 1), 'hsl(' + hues[i] + ' 100% 62%)');
+  return g;
+}
+
+function drawChart() {
+  const { px, py, pw, ph } = LY;
+
+  // panel
+  X.fillStyle = 'rgba(255,255,255,0.025)';
+  rrect(px - 8 * S, py - 4 * S, pw + 20 * S, ph + 12 * S, 10 * S);
+  X.fill();
+
+  // grid
+  const marks = [1, 10, 100, GOAL];
+  const labels = ['$1M', '$10M', '$100M', '$1B'];
+  X.lineWidth = 1;
+  for (let i = 0; i < marks.length; i++) {
+    const y = yv(marks[i]);
+    const goal = marks[i] === GOAL;
+    X.strokeStyle = goal ? 'rgba(255,228,91,' + (0.4 + Math.sin(tGlobal * 4) * 0.22) + ')' : 'rgba(255,255,255,0.09)';
+    X.setLineDash(goal ? [7, 6] : []);
+    X.beginPath();
+    X.moveTo(px, y + .5); X.lineTo(px + pw, y + .5);
+    X.stroke();
+    X.setLineDash([]);
+    txt(labels[i], px - 8 * S, y + 4 * S, 10 * S, goal ? '#ffe45b' : 'rgba(255,255,255,0.34)', 'right', 700, MONO);
+  }
+  txt('UNICORN', px + pw, yv(GOAL) - 7 * S, 10 * S, '#ffe45b', 'right', 800, MONO);
+
+  if (state === 'title' || !G) return;
+
+  const n = G.hist.length;
+  const xAt = i => px + (n < 2 ? 0 : (i / (n - 1)) * pw);
+
+  // market mood band behind the curve
+  X.globalAlpha = 0.16;
+  X.beginPath();
+  X.moveTo(px, py + ph);
+  for (let i = 0; i <= 40; i++) {
+    const f = i / 40;
+    const tt = f * G.t;
+    const m = 1 + 0.42 * Math.sin(tt * 0.29 + 0.7) + 0.22 * Math.sin(tt * 0.81 + 2.1);
+    X.lineTo(px + f * pw, py + ph - (m - 0.3) * ph * 0.075);
+  }
+  X.lineTo(px + pw, py + ph);
+  X.closePath();
+  X.fillStyle = '#6ad1ff';
+  X.fill();
+  X.globalAlpha = 1;
+
+  if (n < 2) return;
+
+  // area fill
+  X.beginPath();
+  X.moveTo(px, py + ph);
+  for (let i = 0; i < n; i++) X.lineTo(xAt(i), yv(G.hist[i]));
+  X.lineTo(xAt(n - 1), py + ph);
+  X.closePath();
+  const ag = X.createLinearGradient(0, py, 0, py + ph);
+  ag.addColorStop(0, 'rgba(255,255,255,0.20)');
+  ag.addColorStop(1, 'rgba(120,80,255,0.02)');
+  X.fillStyle = ag;
+  X.fill();
+
+  // the rainbow line
+  const grad = rainbowGrad(px, px + pw);
+  X.beginPath();
+  X.moveTo(xAt(0), yv(G.hist[0]));
+  for (let i = 1; i < n; i++) X.lineTo(xAt(i), yv(G.hist[i]));
+  X.lineJoin = 'round'; X.lineCap = 'round';
+  X.strokeStyle = grad;
+  X.globalAlpha = 0.22;
+  X.lineWidth = 13 * S + G.valPop * 8;
+  X.stroke();
+  X.globalAlpha = 0.5;
+  X.lineWidth = 6.5 * S;
+  X.stroke();
+  X.globalAlpha = 1;
+  X.lineWidth = 2.6 * S;
+  X.stroke();
+
+  // projection ray toward the goal
+  const hx = xAt(n - 1), hy = yv(G.val);
+  if (G.grow > 0.004 && G.val < GOAL) {
+    const eta = Math.log(GOAL / Math.max(G.val, 0.1)) / G.grow;
+    const pps = pw / Math.max(G.t, 1.5);
+    const tx = Math.min(px + pw + 40 * S, hx + eta * pps);
+    X.save();
+    X.beginPath();
+    X.rect(px, py - 20 * S, pw + 6 * S, ph + 26 * S);
+    X.clip();
+    X.setLineDash([5, 7]);
+    X.strokeStyle = 'rgba(255,228,91,0.5)';
+    X.lineWidth = 1.5 * S;
+    X.beginPath(); X.moveTo(hx, hy); X.lineTo(tx, yv(GOAL)); X.stroke();
+    X.setLineDash([]);
+    X.restore();
+    if (eta < 900)
+      txt('ETA ' + eta.toFixed(0) + 's', clamp(tx, px + 40 * S, px + pw - 4 * S), yv(GOAL) - 8 * S,
+          10 * S, 'rgba(255,228,91,0.85)', 'right', 700, MONO);
+  }
+
+  // head glow + unicorn
+  X.save();
+  X.globalAlpha = 0.85;
+  const rg = X.createRadialGradient(hx, hy, 0, hx, hy, (18 + G.valPop * 40) * S);
+  rg.addColorStop(0, 'rgba(255,255,255,0.9)');
+  rg.addColorStop(1, 'rgba(255,120,255,0)');
+  X.fillStyle = rg;
+  X.beginPath(); X.arc(hx, hy, (18 + G.valPop * 40) * S, 0, 7); X.fill();
+  X.restore();
+
+  // rainbow mane trailing behind head
+  for (let i = 0; i < 7; i++) {
+    X.strokeStyle = 'hsl(' + (i * 45) + ' 100% 65%)';
+    X.lineWidth = 2 * S;
+    X.globalAlpha = 0.75;
+    X.beginPath();
+    const a = -0.5 + i * 0.16 + Math.sin(tGlobal * 6 + i) * 0.08;
+    X.moveTo(hx - 3 * S, hy);
+    X.lineTo(hx - (12 + i * 1.4) * S * Math.cos(a), hy + (10 * Math.sin(a) - 2) * S);
+    X.stroke();
+  }
+  X.globalAlpha = 1;
+  // body + horn
+  X.fillStyle = '#fff';
+  X.beginPath(); X.ellipse(hx, hy, 6.5 * S, 5.2 * S, 0, 0, 7); X.fill();
+  X.fillStyle = '#ffe45b';
+  X.beginPath();
+  X.moveTo(hx + 2 * S, hy - 4 * S);
+  X.lineTo(hx + 11 * S, hy - 13 * S);
+  X.lineTo(hx + 6 * S, hy - 3.5 * S);
+  X.closePath(); X.fill();
+  X.fillStyle = '#111';
+  X.beginPath(); X.arc(hx + 2.6 * S, hy - 0.6 * S, 1.1 * S, 0, 7); X.fill();
+}
+
+function bar(x, y, w, h, f, col, bg) {
+  X.fillStyle = bg || 'rgba(255,255,255,0.10)';
+  rrect(x, y, w, h, h / 2); X.fill();
+  if (f > 0) {
+    X.fillStyle = col;
+    rrect(x, y, Math.max(h, w * clamp(f, 0, 1)), h, h / 2); X.fill();
+  }
+}
+
+function drawHUD() {
+  const pad = 16 * S;
+  const runway = G.cash / Math.max(G.burn, 0.001);
+  const danger = runway < 8;
+
+  // valuation, huge
+  const pop = 1 + G.valPop * 0.14;
+  X.save();
+  X.translate(pad, pad + 40 * S);
+  X.scale(pop, pop);
+  const vs = 46 * S;
+  X.font = '800 ' + vs + 'px ' + MONO;
+  X.textAlign = 'left'; X.textBaseline = 'alphabetic';
+  const vg = X.createLinearGradient(0, -vs, X.measureText(fmt(G.val)).width, 0);
+  vg.addColorStop(0, '#fff'); vg.addColorStop(1, '#ff8ce8');
+  X.fillStyle = vg;
+  X.fillText(fmt(G.val), 0, 0);
+  X.restore();
+  txt('VALUATION', pad + 2 * S, pad + 56 * S, 9.5 * S, 'rgba(255,255,255,0.4)', 'left', 700, MONO);
+
+  // name + tagline (right)
+  txt(G.name, W - pad, pad + 16 * S, 15 * S, '#fff', 'right', 800);
+  txt(G.tagline, W - pad, pad + 31 * S, 10.5 * S, 'rgba(255,255,255,0.42)', 'right', 500);
+  txt('BEST ' + best, W - pad, pad + 48 * S, 10 * S, 'rgba(255,228,91,0.7)', 'right', 700, MONO);
+  txt('PEAK ' + fmt(G.peak) + '   ' + G.t.toFixed(0) + 's', W - pad, pad + 62 * S, 10 * S, 'rgba(255,255,255,0.35)', 'right', 600, MONO);
+
+  // stat rail
+  const rx = pad + 200 * S;
+  const rw = Math.max(120 * S, Math.min(280 * S, W - rx - 210 * S));
+  if (rw > 90 * S) {
+    let ry = pad + 8 * S;
+    const row = (label, val, f, col) => {
+      txt(label, rx, ry + 8 * S, 9.5 * S, 'rgba(255,255,255,0.4)', 'left', 700, MONO);
+      txt(val, rx + rw, ry + 8 * S, 10.5 * S, col, 'right', 800, MONO);
+      bar(rx, ry + 12 * S, rw, 4.5 * S, f, col);
+      ry += 22 * S;
+    };
+    row('RUNWAY', runway.toFixed(0) + 's',
+        runway / 45,
+        danger ? (Math.sin(tGlobal * 12) > 0 ? '#ff2a44' : '#ff8a99') : '#7dff5b');
+    row('HYPE', (G.hype * 100 | 0) + '', G.hype / 1.6, '#ff5bd6');
+    row('MOMENTUM', (G.mom * 100 | 0) + '', G.mom, '#3fe8ff');
+  }
+
+  // burn / staff / cash strip
+  const sy = pad + 78 * S;
+  const info = 'CASH ' + fmt(G.cash) + '   BURN ' + G.burn.toFixed(2) + '/s   TEAM ' + G.staff +
+               '   MARKET ' + (G.market > 1.15 ? 'BULL' : G.market < 0.85 ? 'BEAR' : 'FLAT') +
+               (G.pivotBonus > 1.01 ? '   GROWTH x' + G.pivotBonus.toFixed(1) : '');
+  txt(info, pad, Math.min(sy, LY.hudH - 6 * S), 11 * S, 'rgba(255,255,255,0.55)', 'left', 600, MONO);
+
+  // push indicator
+  if (G.pushAmt > 0.02) {
+    X.globalAlpha = G.pushAmt * 0.9;
+    txt('ALL-HANDS PUSH  ·  2x growth  ·  2x burn', W / 2, LY.py + LY.ph - 8 * S,
+        13 * S, '#ff5bd6', 'center', 800, MONO);
+    X.globalAlpha = 1;
+    X.strokeStyle = 'rgba(255,91,214,' + (G.pushAmt * 0.5) + ')';
+    X.lineWidth = 3 * S;
+    X.strokeRect(2, 2, W - 4, H - 4);
+  }
+
+  // toasts
+  let ty = LY.py + 16 * S;
+  for (const t of toasts) {
+    X.globalAlpha = clamp(t.life * 1.6, 0, 1);
+    txt(t.s, LY.px + LY.pw - 6 * S, ty, 11.5 * S, t.col, 'right', 700);
+    X.globalAlpha = 1;
+    ty += 16 * S;
+  }
+}
+
+function drawCards() {
+  for (let i = 0; i < 4; i++) {
+    const cd = G.slots[i];
+    const r = cardRect(i);
+    if (!cd) {
+      X.globalAlpha = 0.35;
+      X.setLineDash([4, 6]);
+      X.strokeStyle = 'rgba(255,255,255,0.16)';
+      X.lineWidth = 1.4;
+      rrect(r.x, r.y, r.w, r.h, 10 * S); X.stroke();
+      X.setLineDash([]);
+      X.globalAlpha = 1;
+      continue;
+    }
+    const T = TYPES[cd.type];
+    const urgent = cd.life / cd.maxLife < 0.34;
+    const hovered = !cd.played && ptr.x > r.x && ptr.x < r.x + r.w && ptr.y > r.y && ptr.y < r.y + r.h;
+
+    X.save();
+    if (cd.played) {
+      const a = cd.anim;
+      X.globalAlpha = 1 - a;
+      X.translate(r.x + r.w / 2, r.y + r.h / 2 - a * 60 * S);
+      X.scale(1 + a * 0.25, 1 + a * 0.25);
+      X.translate(-r.w / 2, -r.h / 2);
+    } else {
+      const bump = hovered ? -3 * S : 0;
+      const jit = urgent && cd.type === 'crisis' ? Math.sin(tGlobal * 32) * 2.2 : 0;
+      X.translate(r.x + jit, r.y + bump);
+    }
+    const w = r.w, h = r.h;
+
+    // body
+    X.fillStyle = cd.type === 'crisis' ? 'rgba(48,10,18,0.94)' : 'rgba(16,16,32,0.9)';
+    rrect(0, 0, w, h, 10 * S); X.fill();
+    X.strokeStyle = cd.hot > 0 ? '#ff2a44' : (hovered ? '#fff' : T.col);
+    X.globalAlpha = cd.hot > 0 ? 1 : (hovered ? 0.95 : 0.6);
+    X.lineWidth = (hovered ? 2.4 : 1.6) * S;
+    rrect(0, 0, w, h, 10 * S); X.stroke();
+    X.globalAlpha = 1;
+
+    // top colour tab
+    X.fillStyle = T.col;
+    X.globalAlpha = 0.9;
+    rrect(0, 0, w, 3.5 * S, 2 * S); X.fill();
+    X.globalAlpha = 1;
+
+    // everything below stays inside the card
+    X.save();
+    rrect(0, 0, w, h, 10 * S); X.clip();
+
+    // key + tag
+    txt(T.tag, 10 * S, 19 * S, 9.5 * S, T.col, 'left', 800, MONO);
+    txt(String(i + 1), w - 10 * S, 19 * S, 11 * S, 'rgba(255,255,255,0.35)', 'right', 800, MONO);
+
+    // title
+    const ts = clamp(w * 0.075, 10, 15.5) * (S > 1 ? 1.05 : 1);
+    const lines = wrap(cd.title, w - 20 * S, ts, 700).slice(0, 4);
+    let y = 38 * S;
+    for (const ln of lines) {
+      txt(ln, 10 * S, y, ts, cd.type === 'crisis' ? '#ffd7dd' : '#fff', 'left', 700);
+      y += ts * 1.22;
+    }
+
+    // sub + cost
+    const sub = cd.type === 'ship'
+      ? '+' + Math.round(cd.boost * shipMul() * 100) + '% traction  ·  +hype'
+      : cd.sub;
+    txt(sub, 10 * S, h - 24 * S, clamp(w * 0.052, 8.5, 11),
+        cd.type === 'ship' ? 'rgba(63,232,255,0.85)' : 'rgba(255,255,255,0.5)', 'left', 600);
+    const affordable = cd.cost <= G.cash;
+    const costTxt = cd.cost > 0 ? '-' + fmt(cd.cost) : (cd.type === 'raise' ? '+' + fmt(cd.amt) : 'FREE');
+    txt(costTxt, 10 * S, h - 10 * S, 12 * S,
+        cd.cost > 0 ? (affordable ? '#ff9aa7' : '#ff2a44') : '#7dff5b', 'left', 800, MONO);
+
+    // timer
+    const f = clamp(cd.life / cd.maxLife, 0, 1);
+    X.fillStyle = 'rgba(255,255,255,0.09)';
+    rrect(0, h - 4 * S, w, 4 * S, 2 * S); X.fill();
+    X.fillStyle = urgent ? (Math.sin(tGlobal * 20) > 0 ? '#ff2a44' : '#ffae00') : T.col;
+    rrect(0, h - 4 * S, w * f, 4 * S, 2 * S); X.fill();
+
+    X.restore();   // clip
+    X.restore();   // transform
+  }
+}
+
+function drawParticles() {
+  for (const p of particles) {
+    const a = clamp(p.life / p.max, 0, 1);
+    X.globalAlpha = a;
+    if (p.txt) {
+      txt(p.txt, p.x, p.y, 13 * S, p.col, 'center', 800, MONO);
+    } else {
+      X.fillStyle = p.col;
+      X.beginPath(); X.arc(p.x, p.y, p.r * (0.4 + a * 0.6), 0, 7); X.fill();
+    }
+  }
+  X.globalAlpha = 1;
+}
+
+function panel(lines) {
+  const bw = Math.min(W * 0.9, 620 * S);
+  const bh = lines;
+  const bx = (W - bw) / 2, by = (H - bh) / 2;
+  X.fillStyle = 'rgba(6,5,14,0.86)';
+  rrect(bx, by, bw, bh, 16 * S); X.fill();
+  X.strokeStyle = 'rgba(255,255,255,0.14)';
+  X.lineWidth = 1.5;
+  rrect(bx, by, bw, bh, 16 * S); X.stroke();
+  return { bx: bx, by: by, bw: bw, bh: bh };
+}
+
+function drawTitle() {
+  const p = panel(Math.min(H * 0.82, 400 * S));
+  const cx = W / 2;
+  let y = p.by + 62 * S;
+  X.save();
+  X.font = '900 ' + 52 * S + 'px ' + MONO;
+  X.textAlign = 'center';
+  const g = rainbowGrad(cx - 200 * S, cx + 200 * S);
+  X.fillStyle = g;
+  X.fillText('UNICORN.exe', cx, y);
+  X.restore();
+  y += 26 * S;
+  txt('the other kind of unicorn', cx, y, 14 * S, 'rgba(255,255,255,0.6)', 'center', 600);
+  y += 40 * S;
+  txt('Get to a $1B valuation before the runway hits zero.', cx, y, 14 * S, '#fff', 'center', 700);
+  y += 30 * S;
+  const rules = [
+    '1-4 / CLICK  play a card. Fast plays build MOMENTUM.',
+    'HOLD SPACE (or hold the chart)  ALL-HANDS PUSH: 2x growth, 2x burn.',
+    'RED cards are crises. Ignore one and it bites — hard.',
+    'Hype decays every second. Traction compounds. Burn never sleeps.'
+  ];
+  for (const r of rules) {
+    txt(r, cx, y, 12 * S, 'rgba(255,255,255,0.62)', 'center', 600, MONO);
+    y += 19 * S;
+  }
+  y += 22 * S;
+  X.globalAlpha = 0.6 + Math.sin(tGlobal * 5) * 0.4;
+  txt('PRESS ENTER  ·  OR CLICK', cx, y, 16 * S, '#ffe45b', 'center', 800, MONO);
+  X.globalAlpha = 1;
+  y += 24 * S;
+  if (best > 0) txt('BEST SCORE  ' + best, cx, y, 11 * S, 'rgba(255,255,255,0.4)', 'center', 700, MONO);
+}
+
+function drawEnd() {
+  const win = state === 'win';
+  const p = panel(Math.min(H * 0.8, 330 * S));
+  const cx = W / 2;
+  let y = p.by + 60 * S;
+  X.save();
+  X.font = '900 ' + 40 * S + 'px ' + MONO;
+  X.textAlign = 'center';
+  if (win) {
+    X.fillStyle = rainbowGrad(cx - 220 * S, cx + 220 * S);
+    X.fillText('UNICORN', cx, y);
+  } else {
+    X.fillStyle = '#ff4b62';
+    X.fillText('OUT OF RUNWAY', cx, y);
+  }
+  X.restore();
+  y += 28 * S;
+  txt(win ? G.name + ' hit ' + fmt(G.val) + ' in ' + G.t.toFixed(0) + 's'
+          : G.name + ' peaked at ' + fmt(G.peak) + ' after ' + G.t.toFixed(0) + 's',
+      cx, y, 14 * S, '#fff', 'center', 700);
+  y += 24 * S;
+  txt(win ? 'The horn was inside you the whole time.' : G.dead,
+      cx, y, 12.5 * S, 'rgba(255,255,255,0.55)', 'center', 500);
+  y += 44 * S;
+  txt('SCORE', cx, y, 11 * S, 'rgba(255,255,255,0.45)', 'center', 700, MONO);
+  y += 34 * S;
+  txt(String(G.score), cx, y, 40 * S, win ? '#ffe45b' : '#fff', 'center', 900, MONO);
+  y += 22 * S;
+  if (win) txt('peak ' + Math.round(G.peak) + '  +  speed bonus ' + G.speedBonus,
+               cx, y, 11 * S, 'rgba(255,255,255,0.45)', 'center', 600, MONO);
+  y += 26 * S;
+  txt(G.score >= best && G.score > 0 ? 'NEW BEST' : 'BEST ' + best, cx, y, 12 * S,
+      G.score >= best ? '#7dff5b' : 'rgba(255,255,255,0.4)', 'center', 800, MONO);
+  y += 34 * S;
+  X.globalAlpha = 0.6 + Math.sin(tGlobal * 5) * 0.4;
+  txt('R / ENTER / CLICK  —  RUN IT BACK', cx, y, 14 * S, '#fff', 'center', 800, MONO);
+  X.globalAlpha = 1;
+}
+
+function draw() {
+  X.setTransform(DPR, 0, 0, DPR, 0, 0);
+  const sx = (Math.random() - 0.5) * shake, sy = (Math.random() - 0.5) * shake;
+  X.translate(sx, sy);
+
+  drawBG();
+  drawChart();
+  if (G && state !== 'title') { drawHUD(); drawCards(); }
+  drawParticles();
+
+  if (flash > 0) {
+    X.globalAlpha = flash * 0.55;
+    X.fillStyle = flashCol;
+    X.fillRect(-20, -20, W + 40, H + 40);
+    X.globalAlpha = 1;
+  }
+  if (state === 'title') drawTitle();
+  else if (state !== 'play') drawEnd();
+
+  // vignette
+  const vg = X.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.35, W / 2, H / 2, Math.max(W, H) * 0.72);
+  vg.addColorStop(0, 'rgba(0,0,0,0)');
+  vg.addColorStop(1, 'rgba(0,0,0,0.55)');
+  X.fillStyle = vg;
+  X.fillRect(0, 0, W, H);
+}
+
+/* ------------------------------------------------------------------ input */
+function begin() {
+  ac();
+  newGame();
+  state = 'play';
+  SFX.start();
+  flash = 0.25; flashCol = '#fff';
+}
+function anyKeyAction() {
+  if (state === 'title') begin();
+  else if (state === 'over' || state === 'win') begin();
+}
+
+window.addEventListener('keydown', e => {
+  const k = e.key;
+  if (k === ' ' || k === 'Spacebar' || k === 'ArrowUp' || k === 'ArrowDown') e.preventDefault();
+  if (keys[k]) return;
+  keys[k] = 1;
+  if (k === ' ' || k === 'Spacebar') {
+    if (state === 'play') pushKey = 1; else anyKeyAction();
+    return;
+  }
+  if (k === 'Enter') { anyKeyAction(); return; }
+  if (k === 'r' || k === 'R') { if (state !== 'title') begin(); return; }
+  if (k === 'm' || k === 'M') { muted = !muted; toast(muted ? 'muted' : 'unmuted', '#fff'); return; }
+  if (state === 'play' && k >= '1' && k <= '4') playCard(+k - 1);
+});
+window.addEventListener('keyup', e => {
+  keys[e.key] = 0;
+  if (e.key === ' ' || e.key === 'Spacebar') pushKey = 0;
+});
+window.addEventListener('blur', () => { pushKey = 0; pushPtr = 0; for (const k in keys) keys[k] = 0; });
+
+c.addEventListener('pointermove', e => { ptr.x = e.clientX; ptr.y = e.clientY; });
+c.addEventListener('pointerleave', () => { ptr.x = ptr.y = -999; pushPtr = 0; });
+c.addEventListener('pointerdown', e => {
+  ptr.x = e.clientX; ptr.y = e.clientY; ptr.down = 1;
+  if (c.setPointerCapture) { try { c.setPointerCapture(e.pointerId); } catch (err) {} }
+  if (state !== 'play') { anyKeyAction(); return; }
+  for (let i = 0; i < 4; i++) {
+    const r = cardRect(i);
+    if (ptr.x > r.x && ptr.x < r.x + r.w && ptr.y > r.y && ptr.y < r.y + r.h) { playCard(i); return; }
+  }
+  pushPtr = 1;
+});
+c.addEventListener('pointerup', () => { ptr.down = 0; pushPtr = 0; });
+c.addEventListener('pointercancel', () => { ptr.down = 0; pushPtr = 0; });
+c.addEventListener('contextmenu', e => e.preventDefault());
+
+/* ------------------------------------------------------------------- loop */
+resize();
+let last = performance.now();
+requestAnimationFrame(function loop(now) {
+  requestAnimationFrame(loop);
+  const dt = Math.min((now - last) / 1000, 0.05);
+  last = now;
+  update(dt);
+  draw();
+});
+</script>
+</html>

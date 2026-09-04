@@ -1,0 +1,1006 @@
+<!DOCTYPE html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<title>Spectral Order</title>
+<style>
+  html,body{margin:0;height:100%;background:#06050c;overflow:hidden;touch-action:none;
+    font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:#fff;
+    cursor:crosshair;-webkit-user-select:none;user-select:none}
+  canvas{display:block;width:100%;height:100%}
+</style>
+<canvas id=c></canvas>
+<script>
+'use strict';
+
+/* ------------------------------------------------------------------ *
+ * SPECTRAL ORDER  --  js13k 2026 prototype (Unicorns and Rainbows)
+ * Strike enemies in ROYGBIV order. Out of order = broken chain.
+ * ------------------------------------------------------------------ */
+
+const C = document.getElementById('c');
+const X = C.getContext('2d');
+let W = 0, H = 0, DPR = 1;
+
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = innerWidth; H = innerHeight;
+  C.width = (W * DPR) | 0; C.height = (H * DPR) | 0;
+}
+addEventListener('resize', resize); resize();
+
+/* ---------------- utils ---------------- */
+const TAU = Math.PI * 2;
+const rnd = (a, b) => a + Math.random() * (b - a);
+const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
+const lerp = (a, b, t) => a + (b - a) * t;
+const hypot = Math.hypot, cos = Math.cos, sin = Math.sin, atan2 = Math.atan2;
+function angDiff(a, b) { let d = (b - a) % TAU; if (d > Math.PI) d -= TAU; if (d < -Math.PI) d += TAU; return d; }
+function segDist(ax, ay, bx, by, px, py) {
+  const dx = bx - ax, dy = by - ay, l2 = dx * dx + dy * dy;
+  let t = l2 ? ((px - ax) * dx + (py - ay) * dy) / l2 : 0;
+  t = clamp(t, 0, 1);
+  return { d: hypot(px - (ax + dx * t), py - (ay + dy * t)), t: t };
+}
+
+/* ---------------- the spectrum ---------------- */
+const RGB = [[255,54,72],[255,140,26],[255,226,61],[58,238,110],[46,158,255],[116,86,255],[214,74,255]];
+const NAME = ['RED','ORANGE','YELLOW','GREEN','BLUE','INDIGO','VIOLET'];
+const NOTE = [261.6,311.1,349.2,392.0,466.2,523.3,622.3];
+const rgba = (i, a) => 'rgba(' + RGB[i][0] + ',' + RGB[i][1] + ',' + RGB[i][2] + ',' + a + ')';
+const css = i => 'rgb(' + RGB[i][0] + ',' + RGB[i][1] + ',' + RGB[i][2] + ')';
+
+/* pre-rendered glow sprites (one per colour + white) */
+const GLOW = [];
+function makeGlow(r, g, b) {
+  const s = 96, cv = document.createElement('canvas');
+  cv.width = cv.height = s;
+  const cx = cv.getContext('2d');
+  const gr = cx.createRadialGradient(s / 2, s / 2, 0, s / 2, s / 2, s / 2);
+  gr.addColorStop(0, 'rgba(' + r + ',' + g + ',' + b + ',1)');
+  gr.addColorStop(0.25, 'rgba(' + r + ',' + g + ',' + b + ',0.55)');
+  gr.addColorStop(0.6, 'rgba(' + r + ',' + g + ',' + b + ',0.14)');
+  gr.addColorStop(1, 'rgba(' + r + ',' + g + ',' + b + ',0)');
+  cx.fillStyle = gr; cx.fillRect(0, 0, s, s);
+  return cv;
+}
+for (let i = 0; i < 7; i++) GLOW.push(makeGlow(RGB[i][0], RGB[i][1], RGB[i][2]));
+const GLOW_W = makeGlow(255, 255, 255);
+function glow(sprite, x, y, r, a) {
+  X.globalAlpha = a;
+  X.drawImage(sprite, x - r, y - r, r * 2, r * 2);
+  X.globalAlpha = 1;
+}
+
+/* ---------------- tiny WebAudio synth ---------------- */
+let AC = null, MASTER = null, muted = false;
+function actx() {
+  if (AC === null) {
+    try {
+      const Ctor = window.AudioContext || window.webkitAudioContext;
+      AC = Ctor ? new Ctor() : 0;
+      if (AC) { MASTER = AC.createGain(); MASTER.gain.value = 0.5; MASTER.connect(AC.destination); }
+    } catch (e) { AC = 0; }
+  }
+  if (AC && AC.state === 'suspended') { try { AC.resume(); } catch (e) {} }
+  return AC;
+}
+function tone(f, f2, d, type, v, delay, at) {
+  const a = actx(); if (!a || muted) return;
+  try {
+    const t0 = a.currentTime + (delay || 0);
+    const o = a.createOscillator(), g = a.createGain();
+    o.type = type || 'square';
+    o.frequency.setValueAtTime(f, t0);
+    if (f2) o.frequency.exponentialRampToValueAtTime(Math.max(20, f2), t0 + d);
+    g.gain.setValueAtTime(0.0001, t0);
+    g.gain.linearRampToValueAtTime(v, t0 + (at || 0.006));
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + d);
+    o.connect(g); g.connect(MASTER);
+    o.start(t0); o.stop(t0 + d + 0.03);
+  } catch (e) {}
+}
+function noise(d, v, freq, q, delay) {
+  const a = actx(); if (!a || muted) return;
+  try {
+    const t0 = a.currentTime + (delay || 0);
+    const len = Math.max(1, (a.sampleRate * d) | 0);
+    const buf = a.createBuffer(1, len, a.sampleRate);
+    const ch = buf.getChannelData(0);
+    for (let i = 0; i < len; i++) ch[i] = (Math.random() * 2 - 1) * (1 - i / len);
+    const src = a.createBufferSource(); src.buffer = buf;
+    const bp = a.createBiquadFilter(); bp.type = 'bandpass';
+    bp.frequency.setValueAtTime(freq, t0); bp.Q.value = q || 1;
+    const g = a.createGain();
+    g.gain.setValueAtTime(v, t0);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + d);
+    src.connect(bp); bp.connect(g); g.connect(MASTER);
+    src.start(t0); src.stop(t0 + d + 0.02);
+  } catch (e) {}
+}
+const S = {
+  dash()  { tone(300, 110, 0.12, 'sawtooth', 0.07); noise(0.10, 0.06, 1800, 0.8); },
+  kill(i) { tone(NOTE[i], NOTE[i] * 2, 0.13, 'triangle', 0.20); tone(NOTE[i] * 2, NOTE[i] * 3, 0.09, 'square', 0.05); noise(0.07, 0.10, 2600, 1.2); },
+  bad()   { tone(150, 48, 0.34, 'sawtooth', 0.16); tone(103, 40, 0.30, 'square', 0.10); noise(0.24, 0.16, 320, 0.6); },
+  hurt()  { tone(110, 36, 0.38, 'square', 0.18); noise(0.30, 0.14, 200, 0.5); },
+  burst() { for (let i = 0; i < 7; i++) { tone(NOTE[i] * 2, NOTE[i] * 4, 0.30, 'triangle', 0.15, i * 0.045); } tone(65, 130, 0.6, 'sine', 0.22); noise(0.5, 0.10, 1200, 0.4); },
+  over()  { tone(330, 300, 0.2, 'square', 0.15); tone(220, 200, 0.25, 'square', 0.15, 0.18); tone(110, 70, 0.7, 'sawtooth', 0.16, 0.36); },
+  start() { for (let i = 0; i < 4; i++) tone(NOTE[i * 2] * 1.5, NOTE[i * 2] * 1.5, 0.10, 'triangle', 0.12, i * 0.06); }
+};
+
+/* ---------------- persistent best ---------------- */
+const LS_KEY = 'spectral-order.best';
+let best = 0;
+try { best = parseInt(localStorage.getItem(LS_KEY) || '0', 10) || 0; } catch (e) { best = 0; }
+function saveBest() { try { localStorage.setItem(LS_KEY, String(best)); } catch (e) {} }
+
+/* ---------------- state ---------------- */
+let mode = 'title';           // title | play | over
+let T = 0;                    // total elapsed (unscaled)
+let gameT = 0;                // run time
+let score = 0, mult = 1, spectra = 0, kills = 0, level = 1;
+let target = 0;               // index into ROYGBIV we must hit next
+let hitstop = 0, shake = 0, slowmo = 1, flash = 0, badFlash = 0, rainbowFlash = 0;
+let spawnT = 0, starveT = 0, spawnLock = 0;
+let enemies = [], parts = [], texts = [], shocks = [], ghosts = [];
+let overT = 0, titleT = 0;
+
+const P = {
+  x: 0, y: 0, vx: 0, vy: 0, r: 13, ang: -Math.PI / 2,
+  dashT: 0, cool: 0, inv: 0, stun: 0, hp: 4, maxhp: 5,
+  px: 0, py: 0, dx: 0, dy: 0, squash: 0, hitsThisDash: 0
+};
+
+const DASH_DUR = 0.15, DASH_V = 2050, DASH_CD = 0.26;
+
+function reset() {
+  mode = 'play'; gameT = 0; score = 0; mult = 1; spectra = 0; kills = 0; level = 1;
+  target = 0; hitstop = 0; shake = 0; slowmo = 1; flash = 0; badFlash = 0; rainbowFlash = 0;
+  spawnT = 0.4; starveT = 0; spawnLock = 0;
+  enemies.length = 0; parts.length = 0; texts.length = 0; shocks.length = 0; ghosts.length = 0;
+  P.x = W / 2; P.y = H / 2; P.vx = P.vy = 0; P.dashT = 0; P.cool = 0; P.inv = 1.0;
+  P.stun = 0; P.hp = 4; P.ang = -Math.PI / 2; P.squash = 0;
+  S.start();
+}
+
+/* ---------------- spawning ---------------- */
+function edgePoint() {
+  const m = 46;
+  const side = (Math.random() * 4) | 0;
+  if (side === 0) return { x: rnd(-m, W + m), y: -m };
+  if (side === 1) return { x: W + m, y: rnd(-m, H + m) };
+  if (side === 2) return { x: rnd(-m, W + m), y: H + m };
+  return { x: -m, y: rnd(-m, H + m) };
+}
+
+function spawn(forceColour) {
+  let p = edgePoint(), tries = 0;
+  while (hypot(p.x - P.x, p.y - P.y) < 190 && tries++ < 8) p = edgePoint();
+  const sc = 1 + level * 0.055;
+  let type = 'drift';
+  const r = Math.random();
+  if (level >= 3 && r < 0.30) type = 'runner';
+  else if (level >= 5 && r < 0.52) type = 'orbiter';
+  const shifterChance = Math.min(0.55, 0.04 + level * 0.055);
+  const shifter = Math.random() < shifterChance;
+  const c = forceColour !== undefined ? forceColour : (Math.random() * 7) | 0;
+  enemies.push({
+    x: p.x, y: p.y, vx: 0, vy: 0, c: c,
+    r: type === 'runner' ? 12 : type === 'orbiter' ? 14 : 15.5,
+    spd: (type === 'runner' ? 96 : type === 'orbiter' ? 74 : 48) * sc,
+    type: type, shifter: shifter,
+    shiftT: rnd(1.4, 3.2), shiftFlash: 0,
+    orbitDir: Math.random() < 0.5 ? 1 : -1,
+    orbitR: rnd(110, 210),
+    born: 0, wob: rnd(0, TAU), dying: 0
+  });
+}
+
+/* ---------------- fx helpers ---------------- */
+function burstParts(x, y, n, col, speed, life, size) {
+  for (let i = 0; i < n; i++) {
+    const a = rnd(0, TAU), s = rnd(speed * 0.25, speed);
+    parts.push({ x: x, y: y, vx: cos(a) * s, vy: sin(a) * s,
+      life: rnd(life * 0.5, life), max: life, c: col, s: rnd(size * 0.5, size), drag: 2.6 });
+  }
+}
+function text(x, y, str, col, size) {
+  texts.push({ x: x, y: y, s: str, c: col, life: 0.9, max: 0.9, size: size || 20, vy: -46 });
+}
+function shockwave(x, y, col, max, spd, width, rainbow) {
+  shocks.push({ x: x, y: y, r: 0, max: max, spd: spd, c: col, w: width || 4, rainbow: rainbow || 0 });
+}
+function addShake(v) { shake = Math.min(1.4, shake + v); }
+
+/* ---------------- input ---------------- */
+const keys = {};
+let mouse = { x: 0, y: 0, active: false };
+let touchHold = false, touchT = 0, touchStart = { x: 0, y: 0 };
+let wantDash = false;
+
+addEventListener('keydown', e => {
+  if (e.repeat) { return; }
+  keys[e.code] = 1;
+  if (e.code === 'Space') { e.preventDefault(); wantDash = true; actx(); }
+  if (e.code === 'KeyR') { actx(); if (mode !== 'title') reset(); }
+  if (e.code === 'KeyM') { muted = !muted; if (MASTER) MASTER.gain.value = muted ? 0 : 0.5; }
+  if (mode === 'title' && (e.code === 'Space' || e.code === 'Enter')) { actx(); reset(); }
+  if (mode === 'over' && (e.code === 'Space' || e.code === 'Enter')) { actx(); reset(); }
+});
+addEventListener('keyup', e => { keys[e.code] = 0; });
+addEventListener('blur', () => { for (const k in keys) keys[k] = 0; touchHold = false; });
+
+C.addEventListener('contextmenu', e => e.preventDefault());
+addEventListener('pointermove', e => {
+  mouse.x = e.clientX; mouse.y = e.clientY; mouse.active = true;
+  if (touchHold) { touchStart.moved = hypot(e.clientX - touchStart.x, e.clientY - touchStart.y) > 22 || touchStart.moved; }
+});
+addEventListener('pointerdown', e => {
+  actx();
+  mouse.x = e.clientX; mouse.y = e.clientY; mouse.active = true;
+  if (mode === 'title') { reset(); return; }
+  if (mode === 'over') { if (overT > 0.6) reset(); return; }
+  if (e.pointerType === 'touch') {
+    touchHold = true; touchT = 0; touchStart.x = e.clientX; touchStart.y = e.clientY; touchStart.moved = false;
+  } else {
+    wantDash = true;
+  }
+});
+addEventListener('pointerup', e => {
+  if (e.pointerType === 'touch' && touchHold) {
+    touchHold = false;
+    if (touchT < 0.26 && !touchStart.moved) wantDash = true;
+  }
+});
+addEventListener('pointercancel', () => { touchHold = false; });
+
+/* ---------------- combat ---------------- */
+function correctHit(e) {
+  e.dead = 1;
+  kills++;
+  const gain = Math.round((10 + target * 6) * mult);
+  score += gain;
+  const col = e.c;
+  burstParts(e.x, e.y, 16, col, 320, 0.55, 4.5);
+  burstParts(e.x, e.y, 5, -1, 220, 0.35, 3);
+  shockwave(e.x, e.y, col, 90 + target * 12, 620, 3);
+  text(e.x, e.y - 12, '+' + gain, col, 18 + target);
+  addShake(0.24 + target * 0.02);
+  hitstop = Math.max(hitstop, 0.045);
+  flash = Math.max(flash, 0.25);
+  S.kill(target);
+  P.hitsThisDash++;
+  target++;
+  if (target > 6) rainbowBurst();
+}
+
+function rainbowBurst() {
+  target = 0;
+  spectra++;
+  mult = Math.min(9, mult + 1);
+  const gain = 150 * mult;
+  score += gain;
+  P.hp = Math.min(P.maxhp, P.hp + 1);
+  shockwave(P.x, P.y, 0, hypot(W, H) * 1.1, 1500, 26, 1);
+  shockwave(P.x, P.y, 0, hypot(W, H) * 0.7, 900, 10, 1);
+  for (let i = 0; i < 7; i++) burstParts(P.x, P.y, 26, i, 900, 1.1, 6);
+  text(P.x, P.y - 46, 'SPECTRUM! +' + gain, -1, 34);
+  text(P.x, P.y - 12, 'x' + mult, -1, 24);
+  addShake(1.15);
+  hitstop = Math.max(hitstop, 0.20);
+  rainbowFlash = 1;
+  spawnLock = 0.9;
+  S.burst();
+}
+
+function breakChain(e) {
+  if (target === 0 && mult === 1) {
+    // still punish the miss, but softly
+  }
+  const a = atan2(P.y - e.y, P.x - e.x);
+  P.vx = cos(a) * 620; P.vy = sin(a) * 620;
+  e.vx = -cos(a) * 240; e.vy = -sin(a) * 240;
+  P.dashT = 0; P.cool = 0.55; P.stun = 0.4; P.inv = 0.6;
+  target = 0; mult = 1;
+  burstParts(e.x, e.y, 22, e.c, 300, 0.5, 4);
+  burstParts(e.x, e.y, 10, -2, 260, 0.6, 5);
+  shockwave(e.x, e.y, e.c, 130, 700, 6);
+  text(P.x, P.y - 30, 'BROKEN', -2, 26);
+  addShake(0.85);
+  hitstop = Math.max(hitstop, 0.09);
+  badFlash = 1;
+  S.bad();
+}
+
+function damage() {
+  P.hp--; P.inv = 1.4; mult = 1;
+  addShake(1.0); hitstop = Math.max(hitstop, 0.10); badFlash = 1;
+  burstParts(P.x, P.y, 24, -2, 340, 0.7, 5);
+  shockwave(P.x, P.y, 0, 160, 620, 8);
+  S.hurt();
+  if (P.hp <= 0) {
+    mode = 'over'; overT = 0;
+    if (score > best) { best = score; saveBest(); }
+    addShake(1.4);
+    for (let i = 0; i < 7; i++) burstParts(P.x, P.y, 18, i, 640, 1.2, 6);
+    S.over();
+  }
+}
+
+/* ---------------- update ---------------- */
+function update(dt, raw) {
+  if (mode === 'title') { titleT += raw; updateAmbient(dt); return; }
+  if (mode === 'over') { overT += raw; updateFx(dt); updateEnemies(dt, true); return; }
+
+  gameT += dt;
+  level = 1 + Math.floor(gameT / 18);
+
+  /* ---- input direction ---- */
+  let ix = 0, iy = 0;
+  if (keys.KeyA || keys.ArrowLeft) ix--;
+  if (keys.KeyD || keys.ArrowRight) ix++;
+  if (keys.KeyW || keys.ArrowUp) iy--;
+  if (keys.KeyS || keys.ArrowDown) iy++;
+  if (touchHold) {
+    touchT += raw;
+    const dx = mouse.x - P.x, dy = mouse.y - P.y, d = hypot(dx, dy);
+    if (d > 28) { ix = dx / d; iy = dy / d; }
+  }
+  const il = hypot(ix, iy);
+  if (il > 0) { ix /= il; iy /= il; }
+
+  if (mouse.active) P.ang = atan2(mouse.y - P.y, mouse.x - P.x);
+  else if (il > 0) P.ang = atan2(iy, ix);
+
+  /* ---- dash ---- */
+  P.cool -= dt; P.stun -= dt; P.inv -= dt; P.squash = Math.max(0, P.squash - dt * 5);
+  if (wantDash) {
+    wantDash = false;
+    if (P.cool <= 0 && P.dashT <= 0 && P.stun <= 0) {
+      let a = P.ang;
+      if (!mouse.active && il > 0) a = atan2(iy, ix);
+      // gentle aim assist toward a valid (correct colour) target
+      let bestD = 0.30, ba = a;
+      for (let i = 0; i < enemies.length; i++) {
+        const e = enemies[i];
+        if (e.c !== target || e.dying) continue;
+        const d = hypot(e.x - P.x, e.y - P.y);
+        if (d > 340) continue;
+        const ea = atan2(e.y - P.y, e.x - P.x);
+        const ad = Math.abs(angDiff(a, ea));
+        if (ad < bestD) { bestD = ad; ba = ea; }
+      }
+      a = ba;
+      P.ang = a; P.dx = cos(a); P.dy = sin(a);
+      P.dashT = DASH_DUR; P.cool = DASH_CD; P.hitsThisDash = 0; P.squash = 1;
+      S.dash();
+      for (let i = 0; i < 6; i++)
+        parts.push({ x: P.x, y: P.y, vx: -P.dx * rnd(60, 240) + rnd(-60, 60), vy: -P.dy * rnd(60, 240) + rnd(-60, 60),
+          life: 0.3, max: 0.3, c: target, s: 3.5, drag: 3 });
+    }
+  }
+
+  P.px = P.x; P.py = P.y;
+  const dashing = P.dashT > 0;
+  if (dashing) {
+    const u = P.dashT / DASH_DUR;
+    const sp = DASH_V * (0.30 + 0.70 * u * u);
+    P.x += P.dx * sp * dt; P.y += P.dy * sp * dt;
+    P.vx = P.dx * sp * 0.30; P.vy = P.dy * sp * 0.30;
+    P.dashT -= dt;
+    ghosts.push({ x: P.x, y: P.y, a: P.ang, life: 0.26, max: 0.26 });
+  } else {
+    const spd = P.stun > 0 ? 90 : 280;
+    P.vx = lerp(P.vx, ix * spd, 1 - Math.pow(0.0005, dt));
+    P.vy = lerp(P.vy, iy * spd, 1 - Math.pow(0.0005, dt));
+    P.x += P.vx * dt; P.y += P.vy * dt;
+  }
+  const m = 18;
+  if (P.x < m) { P.x = m; P.vx *= -0.3; }
+  if (P.x > W - m) { P.x = W - m; P.vx *= -0.3; }
+  if (P.y < m) { P.y = m; P.vy *= -0.3; }
+  if (P.y > H - m) { P.y = H - m; P.vy *= -0.3; }
+
+  /* ---- dash strikes ---- */
+  if (dashing) {
+    const hits = [];
+    for (let i = 0; i < enemies.length; i++) {
+      const e = enemies[i];
+      if (e.dead || e.dying || e.born < 0.12) continue;
+      const correct = (e.c === target);
+      const R = e.r + P.r * (correct ? 1.45 : 0.70);
+      const sd = segDist(P.px, P.py, P.x, P.y, e.x, e.y);
+      if (sd.d < R) hits.push({ e: e, t: sd.t, ok: correct });
+    }
+    hits.sort((a, b) => a.t - b.t);
+    for (let i = 0; i < hits.length; i++) {
+      const h = hits[i];
+      if (h.e.dead) continue;
+      if (h.ok) correctHit(h.e);
+      else { breakChain(h.e); break; }
+    }
+  }
+
+  updateEnemies(dt, false);
+
+  /* ---- contact damage ---- */
+  if (P.inv <= 0 && P.dashT <= 0) {
+    for (let i = 0; i < enemies.length; i++) {
+      const e = enemies[i];
+      if (e.dead || e.dying || e.born < 0.3) continue;
+      if (hypot(e.x - P.x, e.y - P.y) < e.r + P.r * 0.85) {
+        const a = atan2(P.y - e.y, P.x - e.x);
+        P.vx = cos(a) * 520; P.vy = sin(a) * 520;
+        e.vx = -cos(a) * 300; e.vy = -sin(a) * 300;
+        damage();
+        break;
+      }
+    }
+  }
+
+  /* ---- spawning ---- */
+  spawnLock -= dt;
+  const maxE = Math.min(30, 5 + level * 2);
+  const interval = Math.max(0.24, 1.25 - level * 0.075);
+  if (spawnLock <= 0) {
+    spawnT -= dt;
+    if (spawnT <= 0 && enemies.length < maxE) {
+      spawnT = interval * rnd(0.75, 1.25);
+      let hasTarget = false;
+      for (let i = 0; i < enemies.length; i++) if (enemies[i].c === target && !enemies[i].dying) hasTarget = true;
+      spawn(hasTarget ? undefined : target);
+      if (level >= 4 && Math.random() < 0.28 && enemies.length < maxE) spawn();
+    }
+  }
+  // starvation guard: never leave the player with nothing legal to hit
+  let legal = 0;
+  for (let i = 0; i < enemies.length; i++) if (enemies[i].c === target && !enemies[i].dying) legal++;
+  if (legal === 0) {
+    starveT += dt;
+    if (starveT > 1.1) {
+      starveT = 0;
+      if (enemies.length > 2 && Math.random() < 0.6) {
+        // nudge the nearest shifter into the needed colour
+        let bestE = null, bd = 1e9;
+        for (let i = 0; i < enemies.length; i++) {
+          const e = enemies[i];
+          if (!e.shifter || e.dying) continue;
+          const d = hypot(e.x - P.x, e.y - P.y);
+          if (d < bd) { bd = d; bestE = e; }
+        }
+        if (bestE) { bestE.c = target; bestE.shiftFlash = 0.25; bestE.shiftT = rnd(1.6, 3); }
+        else spawn(target);
+      } else spawn(target);
+    }
+  } else starveT = 0;
+
+  slowmo = lerp(slowmo, target === 6 && mode === 'play' ? 0.80 : 1, 1 - Math.pow(0.002, raw));
+
+  updateFx(dt);
+  enemies = enemies.filter(e => !e.dead);
+}
+
+function updateEnemies(dt, frozen) {
+  for (let i = 0; i < enemies.length; i++) {
+    const e = enemies[i];
+    e.born += dt; e.wob += dt * 3;
+    e.shiftFlash = Math.max(0, e.shiftFlash - dt * 4);
+
+    if (!frozen) {
+      const dx = P.x - e.x, dy = P.y - e.y, d = Math.max(1, hypot(dx, dy));
+      let tx = 0, ty = 0;
+      if (e.type === 'orbiter') {
+        const rad = (d - e.orbitR) / 90;
+        tx = (dx / d) * clamp(rad, -1, 1) + (-dy / d) * e.orbitDir;
+        ty = (dy / d) * clamp(rad, -1, 1) + (dx / d) * e.orbitDir;
+        const tl = Math.max(0.001, hypot(tx, ty)); tx /= tl; ty /= tl;
+      } else {
+        tx = dx / d; ty = dy / d;
+      }
+      // separation
+      let sx = 0, sy = 0;
+      for (let j = 0; j < enemies.length; j++) {
+        if (j === i) continue;
+        const o = enemies[j];
+        const ox = e.x - o.x, oy = e.y - o.y, od = hypot(ox, oy);
+        if (od > 0.001 && od < e.r + o.r + 10) { sx += ox / od; sy += oy / od; }
+      }
+      const wob = sin(e.wob) * 0.25;
+      tx += sx * 0.9 - ty * wob; ty += sy * 0.9 + tx * wob;
+      const tl2 = Math.max(0.001, hypot(tx, ty));
+      const desiredX = (tx / tl2) * e.spd, desiredY = (ty / tl2) * e.spd;
+      const k = 1 - Math.pow(0.02, dt);
+      e.vx = lerp(e.vx, desiredX, k); e.vy = lerp(e.vy, desiredY, k);
+
+      // colour shifting -- faster when the player is close (pressure while you approach)
+      if (e.shifter) {
+        const near = d < 230 ? 2.4 : 1;
+        e.shiftT -= dt * near * (1 + level * 0.03);
+        if (e.shiftT <= 0) {
+          e.shiftT = rnd(1.3, 2.8);
+          e.c = (e.c + (Math.random() < 0.5 ? 1 : 6)) % 7;
+          e.shiftFlash = 1;
+          parts.push({ x: e.x, y: e.y, vx: 0, vy: 0, life: 0.3, max: 0.3, c: -1, s: e.r, drag: 0.1, ring: 1 });
+        }
+      }
+    }
+    e.x += e.vx * dt; e.y += e.vy * dt;
+    // soft bounds once inside the arena
+    if (e.born > 1.2) {
+      const b = 4;
+      if (e.x < b) { e.x = b; e.vx = Math.abs(e.vx); }
+      if (e.x > W - b) { e.x = W - b; e.vx = -Math.abs(e.vx); }
+      if (e.y < b) { e.y = b; e.vy = Math.abs(e.vy); }
+      if (e.y > H - b) { e.y = H - b; e.vy = -Math.abs(e.vy); }
+    }
+  }
+}
+
+function updateAmbient(dt) {
+  // drifting decorative orbs on the title screen
+  if (enemies.length < 12 && Math.random() < dt * 4) {
+    const p = edgePoint();
+    enemies.push({ x: p.x, y: p.y, vx: rnd(-40, 40), vy: rnd(-40, 40), c: (Math.random() * 7) | 0,
+      r: rnd(10, 18), spd: 40, type: 'drift', shifter: false, shiftT: 9, shiftFlash: 0,
+      orbitDir: 1, orbitR: 100, born: 0, wob: 0, dying: 0 });
+  }
+  for (let i = 0; i < enemies.length; i++) {
+    const e = enemies[i];
+    e.born += dt; e.wob += dt * 2;
+    e.x += e.vx * dt; e.y += e.vy * dt;
+    if (e.x < -80 || e.x > W + 80 || e.y < -80 || e.y > H + 80) e.dead = 1;
+  }
+  enemies = enemies.filter(e => !e.dead);
+  updateFx(dt);
+}
+
+function updateFx(dt) {
+  shake = Math.max(0, shake - dt * 2.6);
+  flash = Math.max(0, flash - dt * 4);
+  badFlash = Math.max(0, badFlash - dt * 2.2);
+  rainbowFlash = Math.max(0, rainbowFlash - dt * 1.6);
+
+  let n = 0;
+  for (let i = 0; i < parts.length; i++) {
+    const p = parts[i];
+    p.life -= dt;
+    if (p.life <= 0) continue;
+    if (!p.ring) {
+      p.x += p.vx * dt; p.y += p.vy * dt;
+      const dr = 1 - Math.pow(0.0001, dt * (p.drag || 2));
+      p.vx -= p.vx * dr; p.vy -= p.vy * dr;
+    }
+    parts[n++] = p;
+  }
+  parts.length = n;
+
+  n = 0;
+  for (let i = 0; i < texts.length; i++) {
+    const t = texts[i];
+    t.life -= dt; if (t.life <= 0) continue;
+    t.y += t.vy * dt; t.vy *= 0.94;
+    texts[n++] = t;
+  }
+  texts.length = n;
+
+  n = 0;
+  for (let i = 0; i < ghosts.length; i++) {
+    const g = ghosts[i]; g.life -= dt; if (g.life <= 0) continue; ghosts[n++] = g;
+  }
+  ghosts.length = n;
+
+  n = 0;
+  for (let i = 0; i < shocks.length; i++) {
+    const s = shocks[i];
+    s.r += s.spd * dt;
+    if (s.rainbow) {
+      for (let j = 0; j < enemies.length; j++) {
+        const e = enemies[j];
+        if (e.dead) continue;
+        if (hypot(e.x - s.x, e.y - s.y) < s.r) {
+          e.dead = 1; kills++;
+          const g2 = Math.round(20 * mult);
+          score += g2;
+          burstParts(e.x, e.y, 12, e.c, 340, 0.6, 4.5);
+          text(e.x, e.y, '+' + g2, e.c, 14);
+        }
+      }
+    }
+    if (s.r < s.max) shocks[n++] = s;
+  }
+  shocks.length = n;
+}
+
+/* ---------------- draw ---------------- */
+function pcol(c, a) {
+  if (c >= 0) return rgba(c, a);
+  if (c === -1) return 'rgba(255,255,255,' + a + ')';
+  return 'rgba(255,64,90,' + a + ')';
+}
+
+function drawBg() {
+  X.fillStyle = '#06050c';
+  X.fillRect(0, 0, W, H);
+
+  // faint grid, tinted by the colour you owe
+  const g = 74, off = (T * 9) % g;
+  X.strokeStyle = rgba(target, 0.055);
+  X.lineWidth = 1;
+  X.beginPath();
+  for (let x = -off; x < W + g; x += g) { X.moveTo(x, 0); X.lineTo(x, H); }
+  for (let y = -off; y < H + g; y += g) { X.moveTo(0, y); X.lineTo(W, y); }
+  X.stroke();
+
+  // slow nebula in the target colour
+  X.globalCompositeOperation = 'lighter';
+  glow(GLOW[target], W * 0.5 + cos(T * 0.21) * W * 0.3, H * 0.5 + sin(T * 0.17) * H * 0.3, 420, 0.075);
+  glow(GLOW[(target + 4) % 7], W * 0.5 + cos(T * 0.13 + 2) * W * 0.35, H * 0.5 + sin(T * 0.19 + 1) * H * 0.3, 340, 0.05);
+  X.globalCompositeOperation = 'source-over';
+
+  // vignette
+  const vg = X.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.25, W / 2, H / 2, Math.max(W, H) * 0.75);
+  vg.addColorStop(0, 'rgba(0,0,0,0)');
+  vg.addColorStop(1, 'rgba(0,0,0,0.72)');
+  X.fillStyle = vg;
+  X.fillRect(0, 0, W, H);
+}
+
+function drawEnemy(e) {
+  const grow = e.born < 0.4 ? e.born / 0.4 : 1;
+  const sc = grow * grow * (1 + sin(e.wob) * 0.05);
+  const r = e.r * sc;
+  const isTarget = (e.c === target && mode === 'play');
+
+  X.globalCompositeOperation = 'lighter';
+  glow(GLOW[e.c], e.x, e.y, r * (isTarget ? 4.2 : 3.0), isTarget ? 0.55 : 0.3);
+  X.globalCompositeOperation = 'source-over';
+
+  // body
+  X.beginPath(); X.arc(e.x, e.y, r, 0, TAU);
+  X.fillStyle = rgba(e.c, 0.92); X.fill();
+  X.beginPath(); X.arc(e.x, e.y, r * 0.52, 0, TAU);
+  X.fillStyle = 'rgba(10,8,18,0.85)'; X.fill();
+  X.beginPath(); X.arc(e.x, e.y, r * 0.24, 0, TAU);
+  X.fillStyle = e.shiftFlash > 0.02 ? '#fff' : rgba(e.c, 1); X.fill();
+
+  // type tells
+  X.lineWidth = 2;
+  if (e.type === 'runner') {
+    X.strokeStyle = rgba(e.c, 0.8);
+    X.beginPath();
+    const a = atan2(e.vy, e.vx);
+    X.moveTo(e.x + cos(a - 0.6) * r * 1.6, e.y + sin(a - 0.6) * r * 1.6);
+    X.lineTo(e.x + cos(a) * r * 2.1, e.y + sin(a) * r * 2.1);
+    X.lineTo(e.x + cos(a + 0.6) * r * 1.6, e.y + sin(a + 0.6) * r * 1.6);
+    X.stroke();
+  } else if (e.type === 'orbiter') {
+    X.strokeStyle = rgba(e.c, 0.5);
+    X.beginPath(); X.ellipse(e.x, e.y, r * 1.7, r * 0.7, e.wob * 0.6, 0, TAU); X.stroke();
+  }
+
+  // shifter: rotating dashed ring
+  if (e.shifter) {
+    X.save();
+    X.translate(e.x, e.y); X.rotate(T * 2.2 + e.wob);
+    X.strokeStyle = 'rgba(255,255,255,' + (0.35 + e.shiftFlash * 0.6) + ')';
+    X.lineWidth = 2; X.setLineDash([4, 6]);
+    X.beginPath(); X.arc(0, 0, r * 1.55, 0, TAU); X.stroke();
+    X.setLineDash([]);
+    X.restore();
+  }
+
+  // valid-target marker
+  if (isTarget) {
+    const pu = 0.5 + 0.5 * sin(T * 7 + e.wob);
+    X.strokeStyle = rgba(e.c, 0.5 + pu * 0.5);
+    X.lineWidth = 2 + pu * 1.5;
+    X.beginPath(); X.arc(e.x, e.y, r * 1.9 + pu * 4, 0, TAU); X.stroke();
+    X.fillStyle = 'rgba(255,255,255,' + (0.5 + pu * 0.5) + ')';
+    X.beginPath();
+    const yy = e.y - r * 2.6 - pu * 3;
+    X.moveTo(e.x, yy + 7); X.lineTo(e.x - 6, yy - 2); X.lineTo(e.x + 6, yy - 2);
+    X.closePath(); X.fill();
+  }
+  if (e.shiftFlash > 0.02) {
+    X.globalCompositeOperation = 'lighter';
+    glow(GLOW_W, e.x, e.y, r * 3.2, e.shiftFlash * 0.5);
+    X.globalCompositeOperation = 'source-over';
+  }
+}
+
+function drawUnicorn(x, y, ang, alpha, scale, hornCol) {
+  X.save();
+  X.translate(x, y); X.rotate(ang); X.scale(scale, 1);
+  X.globalAlpha = alpha;
+
+  // mane: the spectrum you carry
+  for (let i = 6; i >= 0; i--) {
+    const w = sin(T * 9 - i * 0.7) * 3.2;
+    X.beginPath();
+    X.arc(-P.r * 0.55 - i * 3.4, w, 5.2 - i * 0.45, 0, TAU);
+    X.fillStyle = rgba(i, 0.9); X.fill();
+  }
+  // body
+  X.beginPath(); X.ellipse(0, 0, P.r * 1.2, P.r * 0.86, 0, 0, TAU);
+  X.fillStyle = '#fdf6ff'; X.fill();
+  X.strokeStyle = 'rgba(180,150,220,0.85)'; X.lineWidth = 1.5; X.stroke();
+  // snout
+  X.beginPath(); X.ellipse(P.r * 0.72, 1.5, P.r * 0.5, P.r * 0.42, 0, 0, TAU);
+  X.fillStyle = '#fff'; X.fill();
+  // ear
+  X.beginPath(); X.moveTo(-1, -P.r * 0.7); X.lineTo(3, -P.r * 1.25); X.lineTo(6, -P.r * 0.6);
+  X.closePath(); X.fillStyle = '#f3e6ff'; X.fill();
+  // eye
+  X.beginPath(); X.arc(P.r * 0.35, -2.5, 1.9, 0, TAU); X.fillStyle = '#241733'; X.fill();
+  // horn -- glows in the colour you must strike next
+  X.beginPath();
+  X.moveTo(P.r * 0.72, -P.r * 0.34);
+  X.lineTo(P.r * 2.25, -P.r * 0.18);
+  X.lineTo(P.r * 0.8, P.r * 0.14);
+  X.closePath();
+  X.fillStyle = css(hornCol); X.fill();
+  X.globalAlpha = 1;
+  X.restore();
+
+  X.globalCompositeOperation = 'lighter';
+  glow(GLOW[hornCol], x + cos(ang) * P.r * 1.9, y + sin(ang) * P.r * 1.9, 26 * alpha + 8, 0.55 * alpha);
+  X.globalCompositeOperation = 'source-over';
+}
+
+function drawPlayer() {
+  // dash ghosts
+  X.globalCompositeOperation = 'lighter';
+  for (let i = 0; i < ghosts.length; i++) {
+    const g = ghosts[i], u = g.life / g.max;
+    glow(GLOW[target], g.x, g.y, 26 * u + 6, u * 0.28);
+  }
+  X.globalCompositeOperation = 'source-over';
+
+  const blink = P.inv > 0 ? (Math.floor(T * 22) % 2 ? 0.35 : 1) : 1;
+  const stretch = 1 + P.squash * 0.55 + (P.dashT > 0 ? 0.25 : 0);
+  drawUnicorn(P.x, P.y, P.ang, blink, stretch, target);
+
+  // dash-ready ring
+  const cd = clamp(1 - P.cool / DASH_CD, 0, 1);
+  X.strokeStyle = cd >= 1 ? 'rgba(255,255,255,0.5)' : 'rgba(255,255,255,0.22)';
+  X.lineWidth = 2.5;
+  X.beginPath(); X.arc(P.x, P.y, P.r * 1.9, -Math.PI / 2, -Math.PI / 2 + TAU * cd); X.stroke();
+}
+
+function drawFx() {
+  X.globalCompositeOperation = 'lighter';
+  for (let i = 0; i < parts.length; i++) {
+    const p = parts[i], u = p.life / p.max;
+    if (p.ring) {
+      X.strokeStyle = pcol(p.c, u * 0.8); X.lineWidth = 2;
+      X.beginPath(); X.arc(p.x, p.y, p.s * (1 + (1 - u) * 2.2), 0, TAU); X.stroke();
+    } else {
+      X.fillStyle = pcol(p.c, u);
+      const s = p.s * u;
+      X.beginPath(); X.arc(p.x, p.y, s, 0, TAU); X.fill();
+    }
+  }
+  for (let i = 0; i < shocks.length; i++) {
+    const s = shocks[i], u = 1 - s.r / s.max;
+    if (s.rainbow) {
+      for (let j = 0; j < 7; j++) {
+        const rr = s.r - j * s.w;
+        if (rr <= 0) continue;
+        X.strokeStyle = rgba(j, u * 0.85);
+        X.lineWidth = s.w;
+        X.beginPath(); X.arc(s.x, s.y, rr, 0, TAU); X.stroke();
+      }
+    } else {
+      X.strokeStyle = rgba(s.c, u * 0.7);
+      X.lineWidth = s.w * u + 1;
+      X.beginPath(); X.arc(s.x, s.y, s.r, 0, TAU); X.stroke();
+    }
+  }
+  X.globalCompositeOperation = 'source-over';
+
+  X.textAlign = 'center';
+  for (let i = 0; i < texts.length; i++) {
+    const t = texts[i], u = t.life / t.max;
+    const sz = t.size * (1 + (1 - u) * 0.25);
+    X.font = '700 ' + sz.toFixed(1) + 'px ui-monospace,Menlo,monospace';
+    if (t.c === -1) {
+      const gr = X.createLinearGradient(t.x - 90, 0, t.x + 90, 0);
+      for (let j = 0; j < 7; j++) gr.addColorStop(j / 6, rgba(j, u));
+      X.fillStyle = gr;
+    } else X.fillStyle = pcol(t.c, u);
+    X.fillText(t.s, t.x, t.y);
+  }
+}
+
+function heart(x, y, s, filled) {
+  X.beginPath();
+  X.moveTo(x, y + s * 0.75);
+  X.bezierCurveTo(x - s * 1.3, y - s * 0.35, x - s * 0.35, y - s * 1.1, x, y - s * 0.35);
+  X.bezierCurveTo(x + s * 0.35, y - s * 1.1, x + s * 1.3, y - s * 0.35, x, y + s * 0.75);
+  if (filled) { X.fillStyle = '#ff5d78'; X.fill(); }
+  else { X.strokeStyle = 'rgba(255,255,255,0.22)'; X.lineWidth = 1.6; X.stroke(); }
+}
+
+function drawHUD() {
+  X.textAlign = 'left';
+  X.font = '700 34px ui-monospace,Menlo,monospace';
+  X.fillStyle = '#fff';
+  X.fillText(String(score), 18, 42);
+  X.font = '600 13px ui-monospace,Menlo,monospace';
+  X.fillStyle = 'rgba(255,255,255,0.45)';
+  X.fillText('BEST ' + best, 18, 62);
+  X.fillText('LV ' + level + '   SPECTRA ' + spectra, 18, 80);
+
+  // multiplier
+  if (mult > 1) {
+    X.font = '700 24px ui-monospace,Menlo,monospace';
+    const gr = X.createLinearGradient(18, 0, 120, 0);
+    for (let j = 0; j < 7; j++) gr.addColorStop(j / 6, rgba(j, 1));
+    X.fillStyle = gr;
+    X.fillText('x' + mult, 18, 108);
+  }
+
+  // hearts
+  for (let i = 0; i < P.maxhp; i++) heart(W - 24 - i * 26, 32, 9, i < P.hp);
+
+  // spectrum track
+  const n = 7, cw = 30, gap = 9, tot = n * cw + (n - 1) * gap;
+  const x0 = (W - tot) / 2, y0 = 26;
+  for (let i = 0; i < n; i++) {
+    const x = x0 + i * (cw + gap);
+    const done = i < target, cur = i === target;
+    const pu = 0.5 + 0.5 * sin(T * 6);
+    X.beginPath();
+    const h = cur ? 16 + pu * 3 : 12;
+    X.roundRect ? X.roundRect(x, y0 - h / 2, cw, h, 6) : X.rect(x, y0 - h / 2, cw, h);
+    if (done) { X.fillStyle = rgba(i, 0.95); X.fill(); }
+    else if (cur) {
+      X.fillStyle = rgba(i, 0.35 + pu * 0.3); X.fill();
+      X.strokeStyle = rgba(i, 1); X.lineWidth = 2.5; X.stroke();
+    } else { X.fillStyle = rgba(i, 0.10); X.fill(); }
+    if (done) {
+      X.globalCompositeOperation = 'lighter';
+      glow(GLOW[i], x + cw / 2, y0, 26, 0.35);
+      X.globalCompositeOperation = 'source-over';
+    }
+  }
+  X.textAlign = 'center';
+  X.font = '700 15px ui-monospace,Menlo,monospace';
+  X.fillStyle = rgba(target, 0.95);
+  X.fillText('STRIKE ' + NAME[target], W / 2, y0 + 34);
+}
+
+function overlay(a) {
+  X.fillStyle = 'rgba(4,3,10,' + a + ')';
+  X.fillRect(0, 0, W, H);
+}
+
+function rainbowText(str, y, size) {
+  X.font = '800 ' + size + 'px ui-monospace,Menlo,monospace';
+  X.textAlign = 'center';
+  const w = X.measureText(str).width;
+  const gr = X.createLinearGradient(W / 2 - w / 2, 0, W / 2 + w / 2, 0);
+  for (let j = 0; j < 7; j++) gr.addColorStop(j / 6, css(j));
+  X.fillStyle = gr;
+  X.fillText(str, W / 2, y);
+}
+
+function drawTitle() {
+  overlay(0.55);
+  const bob = sin(titleT * 2) * 6;
+  rainbowText('SPECTRAL ORDER', H * 0.32 + bob, Math.min(64, W / 11));
+  X.textAlign = 'center';
+  X.font = '600 15px ui-monospace,Menlo,monospace';
+  X.fillStyle = 'rgba(255,255,255,0.75)';
+  X.fillText('Your horn burns with the colour you owe.', W / 2, H * 0.32 + 40 + bob);
+  X.fillText('Dash through them in ROYGBIV order. Hit the wrong one and the chain snaps.', W / 2, H * 0.32 + 62 + bob);
+
+  const lines = [
+    'WASD / ARROWS   move',
+    'MOUSE           aim',
+    'CLICK / SPACE   dash-strike (kills only the correct colour)',
+    'R               restart      M  mute',
+    'TOUCH           hold to move, tap to dash'
+  ];
+  X.font = '500 14px ui-monospace,Menlo,monospace';
+  X.fillStyle = 'rgba(255,255,255,0.5)';
+  for (let i = 0; i < lines.length; i++) X.fillText(lines[i], W / 2, H * 0.55 + i * 22);
+
+  drawUnicorn(W / 2, H * 0.72 + bob * 0.6, -Math.PI / 2 + sin(titleT) * 0.3, 1, 1, Math.floor(titleT * 2) % 7);
+
+  const pu = 0.5 + 0.5 * sin(titleT * 4);
+  X.font = '700 20px ui-monospace,Menlo,monospace';
+  X.fillStyle = 'rgba(255,255,255,' + (0.4 + pu * 0.6) + ')';
+  X.fillText('CLICK or SPACE to begin', W / 2, H * 0.88);
+  if (best > 0) {
+    X.font = '600 14px ui-monospace,Menlo,monospace';
+    X.fillStyle = 'rgba(255,255,255,0.45)';
+    X.fillText('BEST ' + best, W / 2, H * 0.88 + 26);
+  }
+}
+
+function drawOver() {
+  overlay(Math.min(0.72, overT * 1.4));
+  const e = 1 - Math.pow(1 - clamp(overT / 0.5, 0, 1), 3);
+  X.save();
+  X.translate(W / 2, H * 0.4);
+  X.scale(0.85 + e * 0.15, 0.85 + e * 0.15);
+  X.translate(-W / 2, -H * 0.4);
+  rainbowText('SPECTRUM BROKEN', H * 0.4, Math.min(54, W / 13));
+  X.restore();
+  X.textAlign = 'center';
+  X.font = '700 40px ui-monospace,Menlo,monospace';
+  X.fillStyle = '#fff';
+  X.fillText(String(score), W / 2, H * 0.4 + 62);
+  X.font = '600 15px ui-monospace,Menlo,monospace';
+  X.fillStyle = score >= best && score > 0 ? '#ffe23d' : 'rgba(255,255,255,0.55)';
+  X.fillText(score >= best && score > 0 ? 'NEW BEST!' : 'BEST ' + best, W / 2, H * 0.4 + 88);
+  X.fillStyle = 'rgba(255,255,255,0.5)';
+  X.fillText('SPECTRA ' + spectra + '   STRIKES ' + kills + '   LV ' + level, W / 2, H * 0.4 + 114);
+  if (overT > 0.6) {
+    const pu = 0.5 + 0.5 * sin(T * 4);
+    X.font = '700 18px ui-monospace,Menlo,monospace';
+    X.fillStyle = 'rgba(255,255,255,' + (0.35 + pu * 0.55) + ')';
+    X.fillText('CLICK or R to run it back', W / 2, H * 0.4 + 156);
+  }
+}
+
+function draw() {
+  const sx = shake * rnd(-16, 16), sy = shake * rnd(-16, 16);
+  X.setTransform(DPR, 0, 0, DPR, sx * DPR, sy * DPR);
+  drawBg();
+
+  for (let i = 0; i < enemies.length; i++) drawEnemy(enemies[i]);
+  drawFx();
+  if (mode === 'play') drawPlayer();
+  else if (mode === 'over') drawUnicorn(P.x, P.y, P.ang, Math.max(0, 1 - overT), 1, target);
+
+  X.setTransform(DPR, 0, 0, DPR, 0, 0);
+
+  if (flash > 0) { X.globalCompositeOperation = 'lighter'; X.fillStyle = 'rgba(255,255,255,' + flash * 0.10 + ')'; X.fillRect(0, 0, W, H); X.globalCompositeOperation = 'source-over'; }
+  if (rainbowFlash > 0) {
+    X.globalCompositeOperation = 'lighter';
+    const gr = X.createLinearGradient(0, 0, W, H);
+    for (let j = 0; j < 7; j++) gr.addColorStop(j / 6, rgba(j, rainbowFlash * 0.20));
+    X.fillStyle = gr; X.fillRect(0, 0, W, H);
+    X.globalCompositeOperation = 'source-over';
+  }
+  if (badFlash > 0) {
+    X.fillStyle = 'rgba(255,30,60,' + badFlash * 0.16 + ')';
+    X.fillRect(0, 0, W, H);
+    for (let i = 0; i < 40 * badFlash; i++) {
+      X.fillStyle = 'rgba(255,255,255,' + rnd(0.02, 0.10) * badFlash + ')';
+      X.fillRect(rnd(0, W), rnd(0, H), rnd(20, 160), 2);
+    }
+  }
+  if (P.inv > 0 && mode === 'play') {
+    const vg = X.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.3, W / 2, H / 2, Math.max(W, H) * 0.6);
+    vg.addColorStop(0, 'rgba(255,40,70,0)');
+    vg.addColorStop(1, 'rgba(255,40,70,' + clamp(P.inv, 0, 1) * 0.22 + ')');
+    X.fillStyle = vg; X.fillRect(0, 0, W, H);
+  }
+
+  if (mode === 'play' || mode === 'over') drawHUD();
+  if (mode === 'title') drawTitle();
+  if (mode === 'over') drawOver();
+}
+
+/* ---------------- loop ---------------- */
+let last = performance.now();
+requestAnimationFrame(function loop(now) {
+  requestAnimationFrame(loop);
+  let raw = (now - last) / 1000; last = now;
+  if (!(raw > 0)) raw = 0.016;
+  raw = Math.min(raw, 0.05);
+  T += raw;
+  if (hitstop > 0) {
+    hitstop -= raw;
+    shake = Math.max(0, shake - raw * 1.2);
+    draw();
+    return;
+  }
+  update(raw * slowmo, raw);
+  draw();
+});
+</script>
+</html>

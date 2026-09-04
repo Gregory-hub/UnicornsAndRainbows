@@ -1,0 +1,981 @@
+<!DOCTYPE html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<title>PRISM — the horn is a prism</title>
+<style>
+  html,body{margin:0;height:100%;background:#05040d;overflow:hidden;touch-action:none;
+    font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:#fff;
+    -webkit-user-select:none;user-select:none;cursor:crosshair}
+  canvas{display:block;width:100%;height:100%}
+</style>
+<canvas id=c></canvas>
+<script>
+'use strict';
+//////////////////////////////////////////////////////////////////////////////
+// PRISM — a unicorn's horn splits white light. Route the colours into gates.
+//////////////////////////////////////////////////////////////////////////////
+
+const c = document.getElementById('c'), X = c.getContext('2d');
+let W = 0, H = 0, DPR = 1;
+
+// ---------------------------------------------------------------- constants
+const EMPTY = 0, WALL = 1, MIRROR = 2, PRISM = 3, GATE = 4;
+const DX = [1, 0, -1, 0], DY = [0, 1, 0, -1];      // 0=E 1=S 2=W 3=N
+// mask: 1=R 2=G 4=B  (additive)
+const COL = ['#000000', '#ff3b5c', '#3bff8d', '#ffe93b', '#4a8dff', '#ff5ce6', '#3bf2ff', '#ffffff'];
+const RGB = [[0,0,0],[255,59,92],[59,255,141],[255,233,59],[74,141,255],[255,92,230],[59,242,255],[255,255,255]];
+const TMAX = 45, WINLV = 16;
+const PI = Math.PI, TAU = PI * 2;
+
+// -------------------------------------------------------------------- state
+let N = 5, G = [];
+const U = { x: 0, y: 0, d: 0, vx: 0, vy: 0, va: 0, ta: 0 };
+let tray = [], traySel = -1;
+let segs = [], maxDep = 0, reveal = 0;
+let level = 1, score = 0, streak = 0, lastGain = 0;
+let best = +(localStorage.getItem('prism.best') || 0) || 0;
+let timeLeft = 30, state = 'title';
+let shake = 0, flash = 0, flashCol = '255,255,255', hitstop = 0, T = 0, solvedT = 0, overT = 0;
+let sol = null, solU = null, hintI = -2, hintT = 0;
+let hoverC = null, dragU = false, downCell = null, ticked = -1;
+const P = [];
+
+// --------------------------------------------------------------------- util
+const rnd = n => Math.random() * n | 0;
+const rf = (a, b) => a + Math.random() * (b - a);
+const pick = a => a[rnd(a.length)];
+const bits = m => (m & 1) + ((m >> 1) & 1) + ((m >> 2) & 1);
+const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
+const inb = (x, y) => x >= 0 && y >= 0 && x < N && y < N;
+const cell = (x, y) => G[y * N + x];
+const lerp = (a, b, t) => a + (b - a) * t;
+const easeOut = t => 1 - Math.pow(1 - t, 3);
+
+function rr(x, y, w, h, r) {
+  X.beginPath();
+  X.moveTo(x + r, y);
+  X.lineTo(x + w - r, y); X.quadraticCurveTo(x + w, y, x + w, y + r);
+  X.lineTo(x + w, y + h - r); X.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+  X.lineTo(x + r, y + h); X.quadraticCurveTo(x, y + h, x, y + h - r);
+  X.lineTo(x, y + r); X.quadraticCurveTo(x, y, x + r, y);
+  X.closePath();
+}
+
+// -------------------------------------------------------------------- audio
+let AC = null, NB = null, muted = false;
+function ac() {
+  if (!AC) { try { AC = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { AC = 0; } }
+  if (AC && AC.state === 'suspended') AC.resume();
+  return AC;
+}
+function tone(f, dur, type, vol, slide, delay) {
+  const a = ac(); if (!a || muted) return;
+  const t = a.currentTime + (delay || 0);
+  const o = a.createOscillator(), g = a.createGain();
+  o.type = type || 'square';
+  o.frequency.setValueAtTime(f, t);
+  if (slide) o.frequency.exponentialRampToValueAtTime(Math.max(24, f * slide), t + dur);
+  g.gain.setValueAtTime(0.0001, t);
+  g.gain.linearRampToValueAtTime(vol, t + 0.006);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  o.connect(g); g.connect(a.destination);
+  o.start(t); o.stop(t + dur + 0.03);
+}
+function noise(dur, vol, delay, freq) {
+  const a = ac(); if (!a || muted) return;
+  if (!NB) {
+    NB = a.createBuffer(1, (a.sampleRate * 0.6) | 0, a.sampleRate);
+    const ch = NB.getChannelData(0);
+    for (let i = 0; i < ch.length; i++) ch[i] = Math.random() * 2 - 1;
+  }
+  const t = a.currentTime + (delay || 0);
+  const s = a.createBufferSource(); s.buffer = NB;
+  const f = a.createBiquadFilter(); f.type = 'bandpass'; f.frequency.value = freq || 1400; f.Q.value = 1.2;
+  const g = a.createGain();
+  g.gain.setValueAtTime(vol, t);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  s.connect(f); f.connect(g); g.connect(a.destination);
+  s.start(t); s.stop(t + dur + 0.02);
+}
+const sfx = {
+  rot:   () => { tone(340, 0.055, 'square', 0.055, 1.6); noise(0.05, 0.05, 0, 2600); },
+  place: () => { tone(180, 0.10, 'triangle', 0.09, 3.0); },
+  pick:  () => { tone(520, 0.08, 'triangle', 0.07, 0.4); },
+  move:  () => { tone(150, 0.05, 'sine', 0.07, 1.5); },
+  turn:  () => { tone(260, 0.05, 'sine', 0.06, 1.4); },
+  gate:  () => { tone(880, 0.16, 'sine', 0.10, 1.5); tone(1320, 0.12, 'sine', 0.05, 1.5, 0.02); },
+  solve: () => { [523, 659, 784, 1047, 1319].forEach((f, i) => tone(f, 0.34, 'triangle', 0.09, 1, i * 0.055)); noise(0.4, 0.10, 0, 900); },
+  hint:  () => { tone(700, 0.10, 'sine', 0.06, 0.6); },
+  skip:  () => { tone(300, 0.20, 'sawtooth', 0.06, 0.4); },
+  tick:  () => { tone(1500, 0.045, 'square', 0.05, 0.7); },
+  dead:  () => { [330, 262, 196, 131].forEach((f, i) => tone(f, 0.45, 'sawtooth', 0.09, 0.5, i * 0.10)); noise(0.7, 0.12, 0, 300); },
+  win:   () => { [523, 659, 784, 1047, 1319, 1568].forEach((f, i) => tone(f, 0.7, 'triangle', 0.09, 1, i * 0.11)); }
+};
+
+// ------------------------------------------------------------------- layout
+let cs = 48, bx = 0, by = 0, trayY = 0;
+function layout() {
+  const aw = W - 36, ah = H - 210;
+  cs = clamp(Math.min(aw, ah) / N, 26, 92);
+  bx = (W - cs * N) / 2;
+  by = Math.max(84, 96 + (H - 210 - cs * N) / 2);
+  trayY = Math.min(H - 78, by + cs * N + 26);
+}
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = innerWidth; H = innerHeight;
+  c.width = (W * DPR) | 0; c.height = (H * DPR) | 0;
+  X.setTransform(DPR, 0, 0, DPR, 0, 0);
+  layout();
+}
+const px = x => bx + (x + 0.5) * cs;
+const py = y => by + (y + 0.5) * cs;
+
+// -------------------------------------------------------------- simulation
+function mkCell() { return { t: EMPTY, r: 0, c: 0, recv: 0, dep: 0, va: 0, ta: 0, pop: 0, lit: 0, wasLit: 0, hit: 0 }; }
+function newGrid(n) { N = n; G = []; for (let i = 0; i < n * n; i++) G.push(mkCell()); }
+
+function simulate() {
+  segs = []; maxDep = 0;
+  for (const q of G) { q.recv = 0; q.dep = 0; q.hit = 0; }
+  const stack = [{ x: U.x, y: U.y, d: U.d, m: 7, n: 0 }];
+  const seen = new Set();
+  let guard = 0;
+  while (stack.length && guard++ < 4000) {
+    const h = stack.pop();
+    const key = ((h.y * N + h.x) * 4 + h.d) * 8 + h.m;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const nx = h.x + DX[h.d], ny = h.y + DY[h.d], n1 = h.n + 1;
+    if (n1 > maxDep) maxDep = n1;
+    if (!inb(nx, ny)) {
+      segs.push({ x0: h.x, y0: h.y, x1: h.x + DX[h.d] * 0.62, y1: h.y + DY[h.d] * 0.62, m: h.m, n: h.n, out: 1 });
+      continue;
+    }
+    segs.push({ x0: h.x, y0: h.y, x1: nx, y1: ny, m: h.m, n: h.n, out: 0 });
+    const q = cell(nx, ny);
+    if (q.t === WALL) continue;
+    if (q.t === GATE) { q.recv |= h.m; if (n1 > q.dep) q.dep = n1; continue; }
+    if (q.t === MIRROR) { q.hit = 1; stack.push({ x: nx, y: ny, d: q.r ? (h.d ^ 1) : (3 - h.d), m: h.m, n: n1 }); continue; }
+    if (q.t === PRISM) {
+      q.hit = 1;
+      for (let i = 0; i < 3; i++) {
+        const bit = 1 << i;
+        if (!(h.m & bit)) continue;
+        const o = ((i - q.r) % 3 + 3) % 3;                 // 0 straight, 1 cw, 2 ccw
+        const nd = o === 0 ? h.d : o === 1 ? (h.d + 1) & 3 : (h.d + 3) & 3;
+        stack.push({ x: nx, y: ny, d: nd, m: bit, n: n1 });
+      }
+      continue;
+    }
+    stack.push({ x: nx, y: ny, d: h.d, m: h.m, n: n1 });   // empty cell
+  }
+}
+function gates() { return G.filter(q => q.t === GATE); }
+function isSolved() { const g = gates(); return g.length > 0 && g.every(q => q.recv === q.c); }
+
+// ------------------------------------------------------------- generation
+function borderCells() {
+  const r = [];
+  for (let y = 0; y < N; y++) for (let x = 0; x < N; x++)
+    if (x === 0 || y === 0 || x === N - 1 || y === N - 1) r.push([x, y]);
+  return r;
+}
+function inwardDir(x, y) {
+  const o = [];
+  if (x === 0) o.push(0);
+  if (x === N - 1) o.push(2);
+  if (y === 0) o.push(1);
+  if (y === N - 1) o.push(3);
+  return o.length ? pick(o) : 0;
+}
+function setMirror(q, r) { q.t = MIRROR; q.r = r; q.va = q.ta = r ? PI / 4 : -PI / 4; }
+function setPrism(q, r) { q.t = PRISM; q.r = r; q.va = q.ta = 0; }
+
+function genLevel(lv) {
+  const n = 5 + Math.min(3, Math.floor((lv - 1) / 4));
+  const nPieces = Math.min(8, 3 + Math.floor(lv / 2.5));
+  const nWalls = Math.min(5, Math.floor(lv / 3));
+  for (let att = 0; att < 1400; att++) {
+    const relax = att > 500, panic = att > 1100;
+    newGrid(n);
+    const b = pick(borderCells());
+    U.x = b[0]; U.y = b[1]; U.d = inwardDir(U.x, U.y);
+    let prisms = 0;
+    for (let i = 0; i < nPieces; i++) {
+      const x = rnd(N), y = rnd(N), q = cell(x, y);
+      if (q.t !== EMPTY || (x === U.x && y === U.y)) continue;
+      const wantP = prisms < 1 || Math.random() < 0.42;
+      if (wantP) { setPrism(q, rnd(3)); prisms++; } else setMirror(q, rnd(2));
+    }
+    for (let i = 0; i < nWalls; i++) {
+      const x = rnd(N), y = rnd(N), q = cell(x, y);
+      if (q.t === EMPTY && !(x === U.x && y === U.y)) q.t = WALL;
+    }
+    simulate();
+    if (!segs.some(s => s.m !== 7)) continue;                 // no dispersion => dull
+
+    // turn every beam exit into a gate, then let the sim tell us its colour
+    for (const s of segs) {
+      if (!s.out) continue;
+      const q = cell(s.x0, s.y0);
+      if (q.t === EMPTY && !(s.x0 === U.x && s.y0 === U.y)) q.t = GATE;
+    }
+    simulate();
+    for (let pass = 0; pass < 3; pass++) {
+      let changed = false;
+      for (const q of G) if (q.t === GATE && q.recv === 0) { q.t = EMPTY; changed = true; }
+      if (!changed) break;
+      simulate();
+    }
+
+    const gs = gates();
+    if (gs.length < 2 || gs.length > 6) continue;
+    const cols = new Set(gs.map(q => q.recv));
+    const mixed = gs.some(q => bits(q.recv) > 1);
+    if (!panic) {
+      if (cols.size < 2) continue;
+      if (lv >= 2 && !mixed) continue;                    // additive mixing is the point
+      const pieces = G.filter(q => q.t === MIRROR || q.t === PRISM);
+      const used = pieces.filter(q => q.hit).length;
+      const need = relax ? Math.max(2, Math.ceil(pieces.length * 0.35))
+                         : Math.min(pieces.length, 2 + Math.floor(lv / 3));
+      if (used < need) continue;
+    }
+    for (const q of gs) q.c = q.recv;
+    if (!isSolved()) continue;
+    return true;
+  }
+  return false;
+}
+
+function scramble(lv) {
+  sol = G.map(q => ({ t: q.t, r: q.r }));
+  solU = { x: U.x, y: U.y, d: U.d };
+  const cands = [];
+  G.forEach((q, i) => { if ((q.t === MIRROR || q.t === PRISM) && q.hit) cands.push(i); });
+  const nTake = lv < 3 ? 0 : lv < 9 ? 1 : 2;
+
+  for (let attempt = 0; attempt < 60; attempt++) {
+    // restore the solved config
+    G.forEach((q, i) => {
+      q.t = sol[i].t;
+      if (q.t === MIRROR) setMirror(q, sol[i].r);
+      else if (q.t === PRISM) setPrism(q, sol[i].r);
+      q.lit = 0; q.pop = 0;
+    });
+    U.x = solU.x; U.y = solU.y; U.d = solU.d;
+    tray = [];
+    // spin every optic
+    for (const q of G) {
+      if (q.t === MIRROR) setMirror(q, rnd(2));
+      else if (q.t === PRISM) setPrism(q, rnd(3));
+    }
+    // lift a few used optics into the tray
+    const bag = cands.slice();
+    for (let k = 0; k < nTake && bag.length; k++) {
+      const i = bag.splice(rnd(bag.length), 1)[0];
+      tray.push({ t: G[i].t, r: G[i].t === PRISM ? rnd(3) : rnd(2) });
+      G[i].t = EMPTY;
+    }
+    // shove the unicorn along the rim
+    if (lv >= 5) {
+      const opts = borderCells().filter(b => {
+        const q = cell(b[0], b[1]);
+        return q.t === EMPTY && (b[0] !== solU.x || b[1] !== solU.y) &&
+          Math.max(Math.abs(b[0] - solU.x), Math.abs(b[1] - solU.y)) <= (lv >= 10 ? 2 : 1);
+      });
+      if (opts.length) { const b = pick(opts); U.x = b[0]; U.y = b[1]; U.d = inwardDir(U.x, U.y); }
+    }
+    simulate();
+    if (!isSolved()) break;
+  }
+  traySel = tray.length ? 0 : -1;
+  U.vx = U.x; U.vy = U.y; U.va = U.ta = U.d * PI / 2;
+}
+
+// ----------------------------------------------------------------- effects
+function spawn(cx, cy, n, m, spd, life, size) {
+  for (let i = 0; i < n; i++) {
+    const a = Math.random() * TAU, s = rf(spd * 0.25, spd);
+    P.push({
+      x: cx, y: cy, vx: Math.cos(a) * s, vy: Math.sin(a) * s,
+      l: rf(life * 0.5, life), L: life, m: m, s: rf(size * 0.5, size)
+    });
+  }
+  if (P.length > 900) P.splice(0, P.length - 900);
+}
+function rainbowBurst(cx, cy, n, spd) {
+  for (let i = 0; i < n; i++) {
+    const a = Math.random() * TAU, s = rf(spd * 0.2, spd);
+    P.push({ x: cx, y: cy, vx: Math.cos(a) * s, vy: Math.sin(a) * s, l: rf(0.4, 1.2), L: 1.2, m: 1 + rnd(7), s: rf(1.5, 4.5) });
+  }
+}
+
+// ------------------------------------------------------------------ actions
+function changed() {
+  for (const q of G) if (q.t === GATE) q.wasLit = q.lit;   // don't re-ding gates already solved
+  simulate();
+  reveal = 0;
+}
+function rotateAt(i, dir) {
+  const q = G[i];
+  if (q.t === MIRROR) { q.r = (q.r + 1) % 2; q.ta += dir * PI / 2; }
+  else if (q.t === PRISM) { q.r = ((q.r - dir) % 3 + 3) % 3; q.ta += dir * TAU / 3; }
+  else return false;
+  changed(); sfx.rot(); shake = Math.max(shake, 2.2);
+  spawn(px(i % N), py((i / N) | 0), 6, 7, 90, 0.35, 2);
+  return true;
+}
+function moveU(d) {
+  const nx = U.x + DX[d], ny = U.y + DY[d];
+  if (!inb(nx, ny) || cell(nx, ny).t !== EMPTY) { shake = Math.max(shake, 3); return; }
+  U.x = nx; U.y = ny; changed(); sfx.move();
+  spawn(px(U.x), py(U.y), 8, 7, 70, 0.4, 2);
+}
+function turnU(dir) { U.d = ((U.d + dir) % 4 + 4) % 4; U.ta += dir * PI / 2; changed(); sfx.turn(); }
+
+function doHint() {
+  if (state !== 'play' || hintT > 0) return;
+  const opts = [];
+  G.forEach((q, i) => {
+    const s = sol[i];
+    if ((s.t === MIRROR || s.t === PRISM)) {
+      if (q.t !== s.t || q.r !== s.r) opts.push(i);
+    }
+  });
+  if (U.x !== solU.x || U.y !== solU.y) opts.push(-1);
+  if (!opts.length) return;
+  hintI = pick(opts); hintT = 3;
+  timeLeft -= 3; streak = 0; sfx.hint(); shake = Math.max(shake, 5);
+}
+function doSkip() {
+  if (state !== 'play') return;
+  timeLeft -= 5; streak = 0; sfx.skip(); shake = Math.max(shake, 9);
+  flash = 0.5; flashCol = '120,140,255';
+  startLevel();
+}
+
+// --------------------------------------------------------------- game flow
+function startLevel() {
+  if (!genLevel(level)) genLevel(1);
+  scramble(level);
+  layout();
+  simulate();
+  reveal = 0; hintI = -2; hintT = 0;
+  hoverC = null; dragU = false; downCell = null;
+  for (const q of G) { q.lit = 0; q.wasLit = 0; q.pop = 0; }
+}
+function newGame() {
+  level = 1; score = 0; streak = 0; timeLeft = 30; P.length = 0;
+  ticked = -1; state = 'play';
+  startLevel();
+}
+function onSolve() {
+  state = 'solved'; solvedT = 0;
+  hitstop = 0.15; shake = 18; flash = 0.85; flashCol = '255,255,255';
+  const gain = 100 + level * 45 + Math.round(timeLeft * 6) + streak * 30;
+  lastGain = gain; score += gain; streak++;
+  timeLeft = Math.min(TMAX, timeLeft + Math.max(7, 20 - level * 0.7));
+  for (const q of gates()) {
+    const i = G.indexOf(q);
+    rainbowBurst(px(i % N), py((i / N) | 0), 34, 320);
+  }
+  rainbowBurst(px(U.x), py(U.y), 40, 260);
+  if (score > best) { best = score; try { localStorage.setItem('prism.best', best); } catch (e) {} }
+  sfx.solve();
+}
+function gameOver() {
+  state = 'over'; overT = 0;
+  shake = 22; flash = 0.7; flashCol = '255,60,90';
+  sfx.dead();
+  rainbowBurst(W / 2, H / 2, 60, 400);
+  if (score > best) { best = score; try { localStorage.setItem('prism.best', best); } catch (e) {} }
+}
+
+// -------------------------------------------------------------------- input
+function cellAt(cx, cy) {
+  const gx = Math.floor((cx - bx) / cs), gy = Math.floor((cy - by) / cs);
+  return inb(gx, gy) ? [gx, gy] : null;
+}
+function trayAt(cx, cy) {
+  for (let i = 0; i < tray.length; i++) {
+    const r = traySlot(i);
+    if (cx >= r[0] && cx <= r[0] + r[2] && cy >= r[1] && cy <= r[1] + r[3]) return i;
+  }
+  return -1;
+}
+function traySlot(i) {
+  const sw = 52, gap = 10, n = Math.max(1, tray.length);
+  const x0 = W / 2 - (n * sw + (n - 1) * gap) / 2;
+  return [x0 + i * (sw + gap), trayY, sw, sw];
+}
+
+addEventListener('contextmenu', e => e.preventDefault());
+
+c.addEventListener('pointerdown', e => {
+  ac();
+  if (state === 'title') { downCell = null; dragU = false; newGame(); return; }
+  if (state === 'over' || state === 'win') {
+    if (overT > 0.7 || state === 'win') { downCell = null; dragU = false; newGame(); }
+    return;
+  }
+  if (state !== 'play') return;
+  const cc = cellAt(e.clientX, e.clientY);
+  downCell = cc;
+  const ti = trayAt(e.clientX, e.clientY);
+  if (ti >= 0) { traySel = traySel === ti ? -1 : ti; sfx.pick(); downCell = null; return; }
+  if (cc && cc[0] === U.x && cc[1] === U.y) { dragU = true; return; }
+  if (e.button === 2 && cc) { rotateAt(cc[1] * N + cc[0], -1); downCell = null; }
+});
+c.addEventListener('pointermove', e => {
+  hoverC = cellAt(e.clientX, e.clientY);
+});
+c.addEventListener('pointercancel', () => { dragU = false; downCell = null; });
+addEventListener('blur', () => { dragU = false; downCell = null; });
+c.addEventListener('pointerup', e => {
+  if (state !== 'play') { dragU = false; downCell = null; return; }
+  const cc = cellAt(e.clientX, e.clientY);
+  if (dragU) {
+    dragU = false;
+    if (cc && (cc[0] !== U.x || cc[1] !== U.y) && cell(cc[0], cc[1]).t === EMPTY) {
+      U.x = cc[0]; U.y = cc[1]; changed(); sfx.move();
+      spawn(px(U.x), py(U.y), 12, 7, 90, 0.45, 2.5);
+    } else if (cc && cc[0] === U.x && cc[1] === U.y) {
+      turnU(1);
+    }
+    return;
+  }
+  if (!cc || !downCell || cc[0] !== downCell[0] || cc[1] !== downCell[1]) { downCell = null; return; }
+  downCell = null;
+  const i = cc[1] * N + cc[0], q = G[i];
+  if (q.t === MIRROR || q.t === PRISM) {
+    if (e.shiftKey) {                                   // lift into the tray
+      tray.push({ t: q.t, r: q.r }); q.t = EMPTY;
+      traySel = tray.length - 1; changed(); sfx.pick();
+      spawn(px(cc[0]), py(cc[1]), 10, 7, 80, 0.4, 2);
+    } else rotateAt(i, 1);
+  } else if (q.t === EMPTY && traySel >= 0 && traySel < tray.length) {
+    const p = tray.splice(traySel, 1)[0];
+    if (p.t === PRISM) setPrism(q, p.r); else setMirror(q, p.r);
+    traySel = tray.length ? Math.min(traySel, tray.length - 1) : -1;
+    changed(); sfx.place(); shake = Math.max(shake, 4);
+    spawn(px(cc[0]), py(cc[1]), 14, 7, 120, 0.45, 2.5);
+  }
+});
+
+addEventListener('keydown', e => {
+  const k = e.key.toLowerCase();
+  if ([' ', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'].indexOf(k) >= 0) e.preventDefault();
+  ac();
+  if (state === 'title') { newGame(); return; }
+  if (state === 'over' || state === 'win') {
+    if ((k === 'r' || k === ' ' || k === 'enter') && (overT > 0.7 || state === 'win')) newGame();
+    return;
+  }
+  if (k === 'm') { muted = !muted; return; }
+  if (state !== 'play') return;
+  if (k === 'arrowup' || k === 'w') moveU(3);
+  else if (k === 'arrowdown' || k === 's') moveU(1);
+  else if (k === 'arrowleft' || k === 'a') moveU(2);
+  else if (k === 'arrowright' || k === 'd') moveU(0);
+  else if (k === 'q') turnU(-1);
+  else if (k === 'e' || k === ' ') turnU(1);
+  else if (k === 'h') doHint();
+  else if (k === 'x') doSkip();
+  else if (k === 'r') newGame();
+  else if (k >= '1' && k <= '3') { const i = +k - 1; if (i < tray.length) { traySel = i; sfx.pick(); } }
+});
+
+// ------------------------------------------------------------------- update
+function update(dt) {
+  // smoothing
+  U.vx = lerp(U.vx, U.x, Math.min(1, dt * 16));
+  U.vy = lerp(U.vy, U.y, Math.min(1, dt * 16));
+  U.va = lerp(U.va, U.ta, Math.min(1, dt * 14));
+  for (const q of G) {
+    if (q.ta !== q.va) q.va = lerp(q.va, q.ta, Math.min(1, dt * 17));
+    if (q.pop > 0) q.pop = Math.max(0, q.pop - dt * 3.2);
+  }
+  // beam sweep
+  if (reveal < maxDep + 1) reveal += dt * Math.max(26, (maxDep + 2) / 0.20);
+
+  // gate lighting
+  if (state === 'play' || state === 'solved') {
+    for (let i = 0; i < G.length; i++) {
+      const q = G[i];
+      if (q.t !== GATE) continue;
+      const lit = reveal >= q.dep && q.recv !== 0 && q.recv === q.c;
+      if (lit && !q.lit) {
+        q.lit = 1; q.pop = q.wasLit ? 0.35 : 1;
+        if (!q.wasLit) { spawn(px(i % N), py((i / N) | 0), 16, q.c, 160, 0.5, 3); sfx.gate(); }
+      } else if (!lit && q.lit) q.lit = 0;
+      if (q.lit && Math.random() < dt * 22) spawn(px(i % N), py((i / N) | 0), 1, q.c, 40, 0.6, 2);
+    }
+  }
+  // particles
+  for (let i = P.length - 1; i >= 0; i--) {
+    const p = P[i];
+    p.x += p.vx * dt; p.y += p.vy * dt;
+    const dr = Math.pow(0.06, dt);
+    p.vx *= dr; p.vy *= dr; p.vy += 40 * dt;
+    p.l -= dt;
+    if (p.l <= 0) P.splice(i, 1);
+  }
+  shake *= Math.pow(0.0016, dt);
+  if (shake < 0.05) shake = 0;
+  flash = Math.max(0, flash - dt * 3);
+  if (hintT > 0) hintT -= dt;
+
+  if (state === 'play') {
+    timeLeft -= dt;
+    const tsec = Math.ceil(timeLeft);
+    if (tsec <= 5 && tsec !== ticked && tsec > 0) { ticked = tsec; sfx.tick(); shake = Math.max(shake, 2); }
+    if (timeLeft <= 0) { timeLeft = 0; gameOver(); return; }
+    if (reveal >= maxDep && isSolved()) onSolve();
+  } else if (state === 'solved') {
+    solvedT += dt;
+    if (solvedT > 1.05) {
+      level++;
+      if (level > WINLV) { state = 'win'; sfx.win(); rainbowBurst(W / 2, H / 2, 120, 420); }
+      else { state = 'play'; ticked = -1; startLevel(); }
+    }
+  } else if (state === 'over') overT += dt;
+}
+
+// --------------------------------------------------------------------- draw
+function bg() {
+  const g = X.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, '#0c0a24'); g.addColorStop(0.55, '#08061a'); g.addColorStop(1, '#04030c');
+  X.fillStyle = g; X.fillRect(0, 0, W, H);
+  X.globalCompositeOperation = 'lighter';
+  for (let i = 0; i < 3; i++) {
+    const a = T * 0.11 + i * 2.1;
+    const cx = W / 2 + Math.cos(a) * W * 0.32, cy = H * 0.5 + Math.sin(a * 1.27) * H * 0.3;
+    const r = Math.max(W, H) * 0.48;
+    const rg = X.createRadialGradient(cx, cy, 0, cx, cy, r);
+    rg.addColorStop(0, 'hsla(' + ((T * 18 + i * 120) % 360) + ',90%,60%,0.09)');
+    rg.addColorStop(1, 'hsla(0,0%,0%,0)');
+    X.fillStyle = rg; X.fillRect(0, 0, W, H);
+  }
+  X.globalCompositeOperation = 'source-over';
+}
+
+function drawGrid() {
+  // board plate
+  X.fillStyle = 'rgba(255,255,255,0.025)';
+  rr(bx - 10, by - 10, cs * N + 20, cs * N + 20, 14); X.fill();
+  X.strokeStyle = 'rgba(255,255,255,0.08)'; X.lineWidth = 1.5;
+  rr(bx - 10, by - 10, cs * N + 20, cs * N + 20, 14); X.stroke();
+
+  for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) {
+    const q = cell(x, y);
+    const gx = bx + x * cs + 2.5, gy = by + y * cs + 2.5, s = cs - 5;
+    if (q.t === WALL) {
+      X.fillStyle = '#191634'; rr(gx, gy, s, s, 5); X.fill();
+      X.strokeStyle = 'rgba(255,255,255,0.10)'; X.lineWidth = 1.5;
+      rr(gx + 2, gy + 2, s - 4, s - 4, 4); X.stroke();
+    } else {
+      const isHover = hoverC && hoverC[0] === x && hoverC[1] === y && state === 'play';
+      X.fillStyle = isHover ? 'rgba(255,255,255,0.075)' : 'rgba(255,255,255,0.028)';
+      rr(gx, gy, s, s, 5); X.fill();
+      if (q.t === EMPTY && traySel >= 0 && state === 'play') {
+        X.strokeStyle = 'rgba(160,200,255,' + (0.16 + Math.sin(T * 6) * 0.08) + ')';
+        X.lineWidth = 1.5; rr(gx, gy, s, s, 5); X.stroke();
+      }
+    }
+  }
+}
+
+function drawBeams() {
+  X.save();
+  X.globalCompositeOperation = 'lighter';
+  X.lineCap = 'round';
+  for (const s of segs) {
+    const f = clamp(reveal - s.n, 0, 1);
+    if (f <= 0.001) continue;
+    const x0 = px(s.x0), y0 = py(s.y0);
+    const x1 = px(s.x0 + (s.x1 - s.x0) * f), y1 = py(s.y0 + (s.y1 - s.y0) * f);
+    const col = COL[s.m];
+    X.strokeStyle = col;
+    const pulse = 1 + Math.sin(T * 7 + s.n * 0.8) * 0.12;
+    X.globalAlpha = 0.085; X.lineWidth = cs * 0.40 * pulse;
+    X.beginPath(); X.moveTo(x0, y0); X.lineTo(x1, y1); X.stroke();
+    X.globalAlpha = 0.20; X.lineWidth = cs * 0.17 * pulse;
+    X.beginPath(); X.moveTo(x0, y0); X.lineTo(x1, y1); X.stroke();
+    X.globalAlpha = 0.95; X.lineWidth = Math.max(2, cs * 0.055);
+    X.beginPath(); X.moveTo(x0, y0); X.lineTo(x1, y1); X.stroke();
+    // travelling photons
+    X.globalAlpha = 0.9; X.fillStyle = col;
+    for (let k = 0; k < 2; k++) {
+      const ph = ((T * 1.6 + s.n * 0.33 + k * 0.5) % 1) * f;
+      const dx2 = x0 + (x1 - x0) * ph, dy2 = y0 + (y1 - y0) * ph;
+      X.beginPath(); X.arc(dx2, dy2, Math.max(1.5, cs * 0.045), 0, TAU); X.fill();
+    }
+  }
+  X.restore();
+}
+
+function drawMirror(q, x, y) {
+  const cx = px(x), cy = py(y);
+  X.save(); X.translate(cx, cy); X.rotate(q.va);
+  const L = cs * 0.74, Th = Math.max(3, cs * 0.13);
+  X.globalCompositeOperation = 'lighter';
+  X.fillStyle = 'rgba(180,220,255,0.14)';
+  rr(-L / 2 - 3, -Th / 2 - 3, L + 6, Th + 6, (Th + 6) / 2); X.fill();
+  X.globalCompositeOperation = 'source-over';
+  const g = X.createLinearGradient(0, -Th / 2, 0, Th / 2);
+  g.addColorStop(0, '#ffffff'); g.addColorStop(0.45, '#cfe4ff'); g.addColorStop(1, '#5d6f96');
+  X.fillStyle = g;
+  rr(-L / 2, -Th / 2, L, Th, Th / 2); X.fill();
+  X.fillStyle = 'rgba(255,255,255,0.85)';
+  rr(-L / 2 + 2, -Th / 2 + 1, L - 4, Math.max(1, Th * 0.22), 1); X.fill();
+  X.restore();
+}
+
+function drawPrism(q, x, y) {
+  const cx = px(x), cy = py(y), R = cs * 0.36;
+  X.save(); X.translate(cx, cy); X.rotate(q.va);
+  const pts = [];
+  for (let i = 0; i < 3; i++) { const a = -PI / 2 + i * TAU / 3; pts.push([Math.cos(a) * R, Math.sin(a) * R]); }
+  X.beginPath(); X.moveTo(pts[0][0], pts[0][1]);
+  X.lineTo(pts[1][0], pts[1][1]); X.lineTo(pts[2][0], pts[2][1]); X.closePath();
+  const g = X.createLinearGradient(-R, -R, R, R);
+  g.addColorStop(0, 'rgba(255,120,160,0.30)');
+  g.addColorStop(0.5, 'rgba(140,255,200,0.26)');
+  g.addColorStop(1, 'rgba(120,170,255,0.30)');
+  X.fillStyle = g; X.fill();
+  X.strokeStyle = 'rgba(255,255,255,0.92)'; X.lineWidth = Math.max(1.6, cs * 0.035);
+  X.lineJoin = 'round'; X.stroke();
+  // corner tags: the apex colour is the one that passes straight through
+  X.globalCompositeOperation = 'lighter';
+  for (let i = 0; i < 3; i++) {
+    X.fillStyle = COL[1 << ((q.r + i) % 3)];
+    X.globalAlpha = i === 0 ? 1 : 0.7;
+    X.beginPath();
+    X.arc(pts[i][0] * 0.76, pts[i][1] * 0.76, Math.max(2, cs * (i === 0 ? 0.078 : 0.052)), 0, TAU);
+    X.fill();
+  }
+  X.globalAlpha = 1; X.globalCompositeOperation = 'source-over';
+  X.restore();
+}
+
+function drawGateCell(q, x, y) {
+  const cx = px(x), cy = py(y);
+  const R = cs * 0.30 * (1 + q.pop * 0.4);
+  const col = COL[q.c];
+  X.save();
+  X.fillStyle = 'rgba(0,0,0,0.5)';
+  X.beginPath(); X.arc(cx, cy, R + cs * 0.06, 0, TAU); X.fill();
+  if (q.lit) {
+    X.globalCompositeOperation = 'lighter';
+    const rg = X.createRadialGradient(cx, cy, 0, cx, cy, cs * 0.95);
+    rg.addColorStop(0, 'rgba(' + RGB[q.c].join(',') + ',0.55)');
+    rg.addColorStop(1, 'rgba(0,0,0,0)');
+    X.fillStyle = rg; X.beginPath(); X.arc(cx, cy, cs * 0.95, 0, TAU); X.fill();
+    X.globalCompositeOperation = 'source-over';
+  }
+  X.strokeStyle = col; X.lineWidth = Math.max(2, cs * 0.085);
+  X.globalAlpha = q.lit ? 1 : 0.55;
+  X.beginPath(); X.arc(cx, cy, R, 0, TAU); X.stroke();
+  // ticks around the ring
+  X.lineWidth = Math.max(1.5, cs * 0.04);
+  for (let i = 0; i < 4; i++) {
+    const a = T * (q.lit ? 1.6 : 0.3) + i * PI / 2;
+    X.beginPath();
+    X.arc(cx, cy, R + cs * 0.12, a, a + 0.38);
+    X.stroke();
+  }
+  X.globalAlpha = 1;
+  // what it currently receives
+  if (q.recv && reveal >= q.dep) {
+    X.fillStyle = COL[q.recv];
+    X.beginPath(); X.arc(cx, cy, R * (q.lit ? 0.62 : 0.34), 0, TAU); X.fill();
+  }
+  X.restore();
+}
+
+function drawUnicorn(cx, cy, ang, scale, glow) {
+  X.save();
+  X.translate(cx, cy); X.rotate(ang); X.scale(scale, scale);
+  // aura
+  X.globalCompositeOperation = 'lighter';
+  const rg = X.createRadialGradient(0, 0, 0, 0, 0, 1.6);
+  rg.addColorStop(0, 'rgba(255,255,255,' + (0.30 * glow) + ')');
+  rg.addColorStop(1, 'rgba(255,255,255,0)');
+  X.fillStyle = rg; X.beginPath(); X.arc(0, 0, 1.6, 0, TAU); X.fill();
+  X.globalCompositeOperation = 'source-over';
+  // mane
+  for (let i = 0; i < 6; i++) {
+    X.strokeStyle = COL[[1, 3, 2, 6, 4, 5][i]];
+    X.lineWidth = 0.13; X.lineCap = 'round';
+    const w = Math.sin(T * 5 - i * 0.6) * 0.09;
+    X.beginPath();
+    X.moveTo(-0.12, -0.30 + i * 0.11);
+    X.quadraticCurveTo(-0.55 + w, -0.34 + i * 0.13, -0.86 + w * 1.6, -0.05 + i * 0.14);
+    X.stroke();
+  }
+  // head
+  X.fillStyle = '#fdf6ff';
+  X.beginPath(); X.ellipse(-0.02, 0, 0.44, 0.33, 0, 0, TAU); X.fill();
+  X.beginPath(); X.ellipse(0.30, 0.04, 0.24, 0.17, -0.15, 0, TAU); X.fill();
+  // ear
+  X.beginPath(); X.moveTo(-0.16, -0.24); X.lineTo(-0.05, -0.52); X.lineTo(0.08, -0.22); X.closePath(); X.fill();
+  // eye
+  X.fillStyle = '#241a3a';
+  X.beginPath(); X.arc(0.19, -0.05, 0.055, 0, TAU); X.fill();
+  // nostril
+  X.fillStyle = 'rgba(180,150,200,0.7)';
+  X.beginPath(); X.arc(0.47, 0.08, 0.03, 0, TAU); X.fill();
+  // horn
+  X.save();
+  X.rotate(-0.30);
+  const hg = X.createLinearGradient(0.1, 0, 0.95, 0);
+  hg.addColorStop(0, '#ffe9a8'); hg.addColorStop(1, '#ffffff');
+  X.fillStyle = hg;
+  X.beginPath(); X.moveTo(0.12, -0.14); X.lineTo(0.95, 0.0); X.lineTo(0.12, 0.12); X.closePath(); X.fill();
+  X.strokeStyle = 'rgba(200,160,255,0.85)'; X.lineWidth = 0.045;
+  for (let i = 1; i < 5; i++) {
+    const t = i / 5, xx = 0.12 + t * 0.8, hh = 0.13 * (1 - t);
+    X.beginPath(); X.moveTo(xx, -hh); X.lineTo(xx + 0.06, hh); X.stroke();
+  }
+  X.globalCompositeOperation = 'lighter';
+  const tg = X.createRadialGradient(0.95, 0, 0, 0.95, 0, 0.5);
+  tg.addColorStop(0, 'rgba(255,255,255,' + (0.8 * glow) + ')');
+  tg.addColorStop(1, 'rgba(255,255,255,0)');
+  X.fillStyle = tg; X.beginPath(); X.arc(0.95, 0, 0.5, 0, TAU); X.fill();
+  X.restore();
+  X.restore();
+}
+
+function drawParticles() {
+  X.save();
+  X.globalCompositeOperation = 'lighter';
+  for (const p of P) {
+    const a = clamp(p.l / p.L, 0, 1);
+    X.globalAlpha = a;
+    X.fillStyle = COL[p.m];
+    const s = p.s * (0.4 + a * 0.9);
+    X.fillRect(p.x - s / 2, p.y - s / 2, s, s);
+  }
+  X.restore();
+}
+
+function txt(s, x, y, size, col, align, weight) {
+  X.font = (weight ? weight + ' ' : '') + size + 'px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace';
+  X.textAlign = align || 'left'; X.textBaseline = 'middle';
+  X.fillStyle = col; X.fillText(s, x, y);
+}
+function rainbowText(s, x, y, size, weight) {
+  X.font = (weight || 'bold') + ' ' + size + 'px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace';
+  X.textAlign = 'center'; X.textBaseline = 'middle';
+  const w = X.measureText(s).width;
+  const g = X.createLinearGradient(x - w / 2, 0, x + w / 2, 0);
+  for (let i = 0; i <= 6; i++) g.addColorStop(i / 6, 'hsl(' + ((i * 55 + T * 40) % 360) + ',95%,66%)');
+  X.fillStyle = g;
+  X.shadowColor = 'rgba(255,255,255,0.35)'; X.shadowBlur = size * 0.4;
+  X.fillText(s, x, y);
+  X.shadowBlur = 0;
+}
+
+function drawHUD() {
+  // time bar
+  const bw = Math.max(90, Math.min(560, W - 40)), bh = 12, bxx = (W - bw) / 2, byy = 30;
+  X.fillStyle = 'rgba(255,255,255,0.08)'; rr(bxx, byy, bw, bh, 6); X.fill();
+  const f = clamp(timeLeft / TMAX, 0, 1);
+  const low = timeLeft < 8;
+  const g = X.createLinearGradient(bxx, 0, bxx + bw, 0);
+  g.addColorStop(0, low ? '#ff3b5c' : '#3bff8d');
+  g.addColorStop(1, low ? '#ff8a3b' : '#4ad9ff');
+  X.fillStyle = g;
+  X.globalAlpha = low ? 0.6 + Math.abs(Math.sin(T * 9)) * 0.4 : 1;
+  rr(bxx, byy, Math.max(2, bw * f), bh, 6); X.fill();
+  X.globalAlpha = 1;
+  txt(timeLeft.toFixed(1) + 's', bxx + bw / 2, byy - 14, 13, low ? '#ff8fa3' : 'rgba(255,255,255,0.6)', 'center');
+
+  txt('LEVEL ' + level + '/' + WINLV, 18, 24, 15, '#ffffff', 'left', 'bold');
+  const gs = gates(), litN = gs.filter(q => q.lit).length;
+  txt('GATES ' + litN + '/' + gs.length, 18, 46, 13, litN === gs.length ? '#3bff8d' : 'rgba(255,255,255,0.55)');
+  if (streak > 1) txt('STREAK x' + streak, 18, 66, 13, '#ffe93b');
+
+  txt(score.toString().padStart(6, '0'), W - 18, 24, 20, '#ffffff', 'right', 'bold');
+  txt('BEST ' + best, W - 18, 48, 12, 'rgba(255,255,255,0.5)', 'right');
+  txt(muted ? 'MUTED (M)' : '', W - 18, 66, 11, 'rgba(255,255,255,0.35)', 'right');
+
+  // tray
+  for (let i = 0; i < tray.length; i++) {
+    const r = traySlot(i), sel = i === traySel;
+    X.fillStyle = sel ? 'rgba(120,200,255,0.16)' : 'rgba(255,255,255,0.05)';
+    rr(r[0], r[1], r[2], r[3], 8); X.fill();
+    X.strokeStyle = sel ? 'rgba(150,220,255,' + (0.6 + Math.sin(T * 7) * 0.3) + ')' : 'rgba(255,255,255,0.14)';
+    X.lineWidth = sel ? 2.5 : 1.5; rr(r[0], r[1], r[2], r[3], 8); X.stroke();
+    // icon
+    const icx = r[0] + r[2] / 2, icy = r[1] + r[3] / 2;
+    X.save(); X.translate(icx, icy);
+    if (tray[i].t === MIRROR) {
+      X.rotate(-PI / 4);
+      X.fillStyle = '#dbe9ff'; rr(-15, -3, 30, 6, 3); X.fill();
+    } else {
+      X.strokeStyle = '#ffffff'; X.lineWidth = 2; X.beginPath();
+      for (let k = 0; k < 3; k++) { const a = -PI / 2 + k * TAU / 3; const fn = k ? 'lineTo' : 'moveTo'; X[fn](Math.cos(a) * 15, Math.sin(a) * 15); }
+      X.closePath(); X.stroke();
+      X.fillStyle = 'rgba(255,255,255,0.15)'; X.fill();
+    }
+    X.restore();
+    txt(String(i + 1), r[0] + 6, r[1] + 9, 10, 'rgba(255,255,255,0.45)');
+  }
+
+  const hint = 'click optic: turn  ·  shift+click: lift  ·  drag/arrows: move horn  ·  Q/E: aim  ·  H hint -3s  ·  X skip -5s';
+  txt(hint, W / 2, H - 20, Math.min(12, W / 76), 'rgba(255,255,255,0.35)', 'center');
+}
+
+function drawOverlayVeil(a) { X.fillStyle = 'rgba(4,3,12,' + a + ')'; X.fillRect(0, 0, W, H); }
+
+function drawTitle() {
+  drawOverlayVeil(0.62);
+  const cy = H * 0.34;
+  // decorative unicorn with a fanned rainbow
+  X.save();
+  X.globalCompositeOperation = 'lighter';
+  X.lineCap = 'round';
+  for (let i = 0; i < 7; i++) {
+    X.strokeStyle = COL[[1, 3, 2, 6, 4, 5, 7][i]];
+    X.globalAlpha = 0.5;
+    X.lineWidth = 5;
+    const a = (i - 3) * 0.13;
+    X.beginPath();
+    X.moveTo(W / 2 - 130, cy - 40);
+    X.lineTo(W / 2 - 130 + Math.cos(a) * 460, cy - 40 + Math.sin(a) * 460);
+    X.stroke();
+  }
+  X.restore();
+  drawUnicorn(W / 2 - 175, cy - 40, -0.12, 62, 1);
+
+  rainbowText('P R I S M', W / 2, H * 0.53, Math.min(74, W / 9));
+  txt('the unicorn\'s horn is a prism', W / 2, H * 0.53 + 46, Math.min(16, W / 34), 'rgba(255,255,255,0.65)', 'center');
+
+  const L = [
+    'White light fires from the horn. Prisms split it into R / G / B.',
+    'Mirrors bend it. Beams that overlap add:  R+G = yellow,  G+B = cyan.',
+    'Light every gate with exactly its colour before the clock runs dry.',
+    '',
+    'click an optic to turn it  ·  shift+click to lift it into the tray',
+    'drag the unicorn or use ARROWS / WASD  ·  Q / E to aim the horn',
+    'H = hint (-3s)   X = new puzzle (-5s)   M = mute   R = restart'
+  ];
+  for (let i = 0; i < L.length; i++)
+    txt(L[i], W / 2, H * 0.66 + i * 20, Math.min(13, W / 42), 'rgba(255,255,255,' + (i > 3 ? 0.42 : 0.72) + ')', 'center');
+
+  const a = 0.55 + Math.abs(Math.sin(T * 3)) * 0.45;
+  txt('PRESS ANY KEY', W / 2, H - 54, 18, 'rgba(255,255,255,' + a + ')', 'center', 'bold');
+  if (best) txt('BEST ' + best, W / 2, H - 30, 12, 'rgba(255,255,255,0.4)', 'center');
+}
+
+function drawSolved() {
+  const t = clamp(solvedT / 0.4, 0, 1), e = easeOut(t);
+  X.save();
+  X.globalAlpha = clamp(1.6 - solvedT, 0, 1);
+  const s = 0.6 + e * 0.4;
+  X.translate(W / 2, H * 0.42);
+  X.scale(s, s);
+  rainbowText('SOLVED', 0, 0, 62);
+  txt('+' + lastGain, 0, 48, 26, '#ffffff', 'center', 'bold');
+  X.restore();
+}
+
+function drawOver() {
+  drawOverlayVeil(clamp(overT * 1.6, 0, 0.78));
+  X.save();
+  X.globalAlpha = clamp(overT * 2, 0, 1);
+  rainbowText('SPECTRUM LOST', W / 2, H * 0.36, Math.min(46, W / 13));
+  txt('LEVEL ' + level, W / 2, H * 0.36 + 48, 16, 'rgba(255,255,255,0.6)', 'center');
+  txt('SCORE ' + score, W / 2, H * 0.5, 34, '#ffffff', 'center', 'bold');
+  txt('BEST ' + best, W / 2, H * 0.5 + 34, 16, score >= best ? '#ffe93b' : 'rgba(255,255,255,0.5)', 'center');
+  const a = 0.5 + Math.abs(Math.sin(T * 3)) * 0.5;
+  txt('PRESS R OR CLICK TO GO AGAIN', W / 2, H * 0.68, 16, 'rgba(255,255,255,' + a + ')', 'center', 'bold');
+  X.restore();
+}
+
+function drawWin() {
+  drawOverlayVeil(0.7);
+  rainbowText('SPECTRUM COMPLETE', W / 2, H * 0.34, Math.min(44, W / 15));
+  txt('all 16 refractions solved', W / 2, H * 0.34 + 42, 16, 'rgba(255,255,255,0.65)', 'center');
+  txt('SCORE ' + score, W / 2, H * 0.5, 38, '#ffffff', 'center', 'bold');
+  txt('BEST ' + best, W / 2, H * 0.5 + 36, 16, '#ffe93b', 'center');
+  const a = 0.5 + Math.abs(Math.sin(T * 3)) * 0.5;
+  txt('PRESS R OR CLICK TO PLAY AGAIN', W / 2, H * 0.68, 16, 'rgba(255,255,255,' + a + ')', 'center', 'bold');
+}
+
+function draw() {
+  bg();
+  if (state !== 'title') {
+    X.save();
+    if (shake > 0.05) X.translate(rf(-shake, shake), rf(-shake, shake));
+    drawGrid();
+    // gates under the beams
+    for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) {
+      const q = cell(x, y);
+      if (q.t === GATE) drawGateCell(q, x, y);
+    }
+    drawBeams();
+    for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) {
+      const q = cell(x, y);
+      if (q.t === MIRROR) drawMirror(q, x, y);
+      else if (q.t === PRISM) drawPrism(q, x, y);
+    }
+    // hint ring
+    if (hintT > 0) {
+      const hx = hintI === -1 ? solU.x : hintI % N, hy = hintI === -1 ? solU.y : (hintI / N) | 0;
+      X.strokeStyle = 'rgba(255,255,255,' + (0.35 + Math.abs(Math.sin(T * 8)) * 0.5) + ')';
+      X.lineWidth = 3;
+      const rad = cs * (0.36 + Math.abs(Math.sin(T * 4)) * 0.12);
+      X.beginPath(); X.arc(px(hx), py(hy), rad, 0, TAU); X.stroke();
+    }
+    // drag ghost
+    if (dragU && hoverC && inb(hoverC[0], hoverC[1]) && cell(hoverC[0], hoverC[1]).t === EMPTY) {
+      X.globalAlpha = 0.3;
+      drawUnicorn(px(hoverC[0]), py(hoverC[1]), U.va, cs * 0.5, 0.6);
+      X.globalAlpha = 1;
+    }
+    drawUnicorn(px(U.vx), py(U.vy), U.va, cs * 0.52, 0.7 + Math.sin(T * 4) * 0.15);
+    drawParticles();
+    X.restore();
+    drawHUD();
+  } else {
+    drawParticles();
+  }
+
+  if (state === 'title') drawTitle();
+  else if (state === 'solved') drawSolved();
+  else if (state === 'over') drawOver();
+  else if (state === 'win') drawWin();
+
+  if (flash > 0.001) {
+    X.fillStyle = 'rgba(' + flashCol + ',' + (flash * 0.55) + ')';
+    X.fillRect(0, 0, W, H);
+  }
+  // vignette
+  const vg = X.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.35, W / 2, H / 2, Math.max(W, H) * 0.75);
+  vg.addColorStop(0, 'rgba(0,0,0,0)'); vg.addColorStop(1, 'rgba(0,0,0,0.55)');
+  X.fillStyle = vg; X.fillRect(0, 0, W, H);
+}
+
+// --------------------------------------------------------------------- boot
+onresize = resize;
+resize();
+newGrid(5);
+U.x = 0; U.y = 2; U.d = 0; U.vx = 0; U.vy = 2; U.va = U.ta = 0;
+simulate();
+
+let last = performance.now();
+requestAnimationFrame(function loop(now) {
+  requestAnimationFrame(loop);
+  const dt = Math.min((now - last) / 1000, 0.05);
+  last = now;
+  T += dt;
+  if (hitstop > 0) hitstop -= dt; else update(dt);
+  draw();
+});
+</script>
+</html>
