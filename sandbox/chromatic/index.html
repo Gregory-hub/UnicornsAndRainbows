@@ -619,7 +619,7 @@ function drawIslands(){
       for (let i = 1; i < o.pts.length; i++) X.lineTo(sx + o.pts[i][0], sy + o.pts[i][1]);
       X.closePath();
       const g = o.g * (1 - 0.4 * dangerT) + chroma;
-      X.fillStyle = 'rgba(24,25,32,0.9)'; X.fill();
+      X.fillStyle = 'rgba(31,32,41,0.92)'; X.fill();
       if (g > 0.01){
         X.save(); X.globalCompositeOperation = 'lighter';
         X.fillStyle = 'hsla(' + ((o.x * 0.3 + o.y * 0.2 + anim * 30) % 360) + ',80%,50%,' + (g * 0.13).toFixed(3) + ')';
@@ -763,17 +763,17 @@ function drawUnicorn(){
 
   /* glow */
   X.save(); X.globalCompositeOperation = 'lighter';
-  const rg = X.createRadialGradient(sx, sy, 0, sx, sy, 62);
-  rg.addColorStop(0, 'hsla(' + hue + ',100%,72%,0.34)');
-  rg.addColorStop(0.45, 'hsla(' + ((hue + 40) % 360) + ',100%,62%,0.11)');
+  const rg = X.createRadialGradient(sx, sy, 0, sx, sy, 78);
+  rg.addColorStop(0, 'hsla(' + hue + ',100%,72%,0.36)');
+  rg.addColorStop(0.45, 'hsla(' + ((hue + 40) % 360) + ',100%,62%,0.12)');
   rg.addColorStop(1, 'hsla(' + hue + ',100%,60%,0)');
-  X.fillStyle = rg; X.fillRect(sx - 62, sy - 62, 124, 124);
+  X.fillStyle = rg; X.fillRect(sx - 78, sy - 78, 156, 156);
   X.restore();
 
   X.save();
   X.translate(sx, sy);
   X.rotate(ang * f);
-  X.scale(f, 1);
+  X.scale(f * 1.32, 1.32);
   const sq = clamp(P.sq, -0.5, 0.6);
   X.scale(1 + sq * 0.35, 1 - sq * 0.35);
 
@@ -839,11 +839,11 @@ function drawUnicorn(){
   hg.addColorStop(0, 'hsl(' + hue + ',100%,70%)');
   hg.addColorStop(0.5, 'hsl(' + ((hue + 60) % 360) + ',100%,72%)');
   hg.addColorStop(1, 'hsl(' + ((hue + 130) % 360) + ',100%,80%)');
-  X.strokeStyle = hg; X.lineWidth = 3.2; X.lineCap = 'round';
-  X.beginPath(); X.moveTo(21.5, -18); X.lineTo(30.5, -28.5); X.stroke();
+  X.strokeStyle = hg; X.lineWidth = 2.6; X.lineCap = 'round';
+  X.beginPath(); X.moveTo(21.5, -18); X.lineTo(31, -29); X.stroke();
   X.save(); X.globalCompositeOperation = 'lighter';
-  X.strokeStyle = 'hsla(' + hue + ',100%,75%,0.5)'; X.lineWidth = 8;
-  X.beginPath(); X.moveTo(21.5, -18); X.lineTo(30.5, -28.5); X.stroke();
+  X.strokeStyle = 'hsla(' + hue + ',100%,75%,0.28)'; X.lineWidth = 5;
+  X.beginPath(); X.moveTo(21.5, -18); X.lineTo(31, -29); X.stroke();
   X.restore();
 
   X.restore();
@@ -852,10 +852,10 @@ function drawUnicorn(){
   X.save(); X.globalCompositeOperation = 'lighter';
   for (let i = 0; i < P.chMax; i++){
     const a = anim * 1.6 + i / P.chMax * TAU;
-    const ox = sx + Math.cos(a) * 30, oy = sy + Math.sin(a) * 30 - 4;
+    const ox = sx + Math.cos(a) * 40, oy = sy + Math.sin(a) * 40 - 6;
     const on = i < P.ch;
     X.fillStyle = on ? 'hsla(' + ((hue + i * 45) % 360) + ',100%,68%,0.95)' : 'rgba(120,122,138,0.35)';
-    X.beginPath(); X.arc(ox, oy, on ? 3 : 2, 0, TAU); X.fill();
+    X.beginPath(); X.arc(ox, oy, on ? 3.4 : 2, 0, TAU); X.fill();
   }
   X.restore();
 }
@@ -901,7 +901,7 @@ function vignette(){
   }
   const g2 = X.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.3, W / 2, H / 2, Math.max(W, H) * 0.78);
   g2.addColorStop(0, 'rgba(0,0,0,0)');
-  g2.addColorStop(1, 'rgba(0,0,0,0.55)');
+  g2.addColorStop(1, 'rgba(0,0,0,0.46)');
   X.fillStyle = g2; X.fillRect(0, 0, W, H);
   if (flash > 0.002){
     X.save(); X.globalCompositeOperation = 'lighter';
@@ -931,37 +931,37 @@ function hud(){
   if (state === 'title'){
     X.save();
     X.fillStyle = 'rgba(8,8,12,0.62)'; X.fillRect(0, 0, W, H);
-    const cxp = W / 2, cyp = H / 2;
+    const cxp = W / 2, cyp = H / 2, S = clamp(H / 800, 0.6, 1.05);
 
-    /* decorative rainbow swash behind the title */
+    /* decorative rainbow swash, in a band of its own */
     X.save(); X.globalCompositeOperation = 'lighter';
+    const swy = cyp - 40 * S;
     for (let pass = 0; pass < 2; pass++){
-      for (let i = 0; i < 64; i++){
-        const t0 = i / 64, t1 = (i + 1) / 64;
+      for (let i = 0; i < 72; i++){
+        const t0 = i / 72, t1 = (i + 1) / 72;
         const px0 = -60 + t0 * (W + 120), px1 = -60 + t1 * (W + 120);
-        const wob = k => Math.sin(k * 5.4 + anim * 0.9) * 62 + Math.sin(k * 11 - anim * 1.4) * 22;
-        const py0 = cyp - 6 + wob(t0), py1 = cyp - 6 + wob(t1);
-        X.strokeStyle = 'hsla(' + ((t0 * 330 + anim * 26) % 360) + ',100%,58%,' + (pass ? 0.9 : 0.09) + ')';
-        X.lineWidth = pass ? 6 : 34;
+        const wob = k => (Math.sin(k * 5.4 + anim * 0.9) * 20 + Math.sin(k * 11 - anim * 1.4) * 7) * S;
+        X.strokeStyle = 'hsla(' + ((t0 * 330 + anim * 26) % 360) + ',100%,58%,' + (pass ? 0.92 : 0.10) + ')';
+        X.lineWidth = (pass ? 6 : 30) * S;
         X.lineCap = 'round';
-        X.beginPath(); X.moveTo(px0, py0); X.lineTo(px1, py1); X.stroke();
+        X.beginPath(); X.moveTo(px0, swy + wob(t0)); X.lineTo(px1, swy + wob(t1)); X.stroke();
       }
     }
     X.restore();
 
-    const big = Math.min(96, W / 9);
-    txt('CHROMATIC', cxp, cyp - big * 0.95, big, (i, n) => 'hsl(' + ((i / n * 300 + anim * 40) % 360) + ',95%,66%)', 'c', big * 0.13, 800);
-    txt('colour is solidity', cxp, cyp - big * 0.35, Math.min(20, W / 34), 'rgba(206,208,222,0.8)', 'c', 5, 500);
+    const big = Math.min(96 * S, W / 9);
+    txt('CHROMATIC', cxp, cyp - 160 * S, big, (i, n) => 'hsl(' + ((i / n * 300 + anim * 40) % 360) + ',95%,66%)', 'c', big * 0.13, 800);
+    txt('colour is solidity', cxp, cyp - 112 * S, Math.min(19, W / 34), 'rgba(206,208,222,0.85)', 'c', 5, 500);
 
-    const y = cyp + big * 0.72;
-    txt('A / D  or  ← →      run', cxp, y, 15, 'rgba(180,182,198,0.9)', 'c', 1.5, 500);
-    txt('SPACE  jump on your own trail  •  in the air, it dashes', cxp, y + 26, 15, 'rgba(180,182,198,0.9)', 'c', 1.5, 500);
-    txt('CLICK  dash toward the cursor  •  M  mute', cxp, y + 52, 15, 'rgba(180,182,198,0.9)', 'c', 1.5, 500);
-    txt('the world is grey and you fall straight through it.', cxp, y + 88, 14, 'rgba(140,142,160,0.85)', 'c', 1, 500);
-    txt('only your rainbow is solid, and it is dying behind you.', cxp, y + 108, 14, 'rgba(140,142,160,0.85)', 'c', 1, 500);
+    const y = cyp + 46 * S, ls = 25 * S;
+    txt('A / D  or  ← →   run', cxp, y, 15, 'rgba(184,186,202,0.92)', 'c', 1.5, 500);
+    txt('SPACE   jump off your trail  •  in the air, it dashes', cxp, y + ls, 15, 'rgba(184,186,202,0.92)', 'c', 1.5, 500);
+    txt('CLICK   dash toward the cursor   •   M  mute', cxp, y + ls * 2, 15, 'rgba(184,186,202,0.92)', 'c', 1.5, 500);
+    txt('the world is grey and you fall straight through it.', cxp, y + ls * 3.5, 14, 'rgba(142,144,162,0.9)', 'c', 1, 500);
+    txt('only your rainbow is solid, and it is dying behind you.', cxp, y + ls * 4.4, 14, 'rgba(142,144,162,0.9)', 'c', 1, 500);
     const pulse = 0.55 + 0.45 * Math.sin(anim * 3);
-    txt('PRESS ANYTHING', cxp, y + 150, 18, 'rgba(255,255,255,' + pulse.toFixed(2) + ')', 'c', 6, 700);
-    if (best > 0) txt('BEST  ' + best, cxp, y + 182, 14, 'rgba(150,152,170,0.8)', 'c', 3, 600);
+    txt('PRESS ANYTHING', cxp, y + ls * 6, 18, 'rgba(255,255,255,' + pulse.toFixed(2) + ')', 'c', 6, 700);
+    if (best > 0) txt('BEST  ' + best, cxp, y + ls * 7.2, 14, 'rgba(150,152,170,0.85)', 'c', 3, 600);
     X.restore();
     return;
   }
@@ -1045,6 +1045,9 @@ function frame(now){
     const sdt = dt / steps;
     for (let i = 0; i < steps && state === 'play'; i++) step(sdt);
     stepParticles(dt);
+  } else if (state === 'title'){
+    stepParticles(dt);
+    cam.x = 385; cam.y = -215;
   } else {
     stepParticles(dt);
     if (state !== 'title'){

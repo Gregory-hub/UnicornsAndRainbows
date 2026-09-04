@@ -237,7 +237,7 @@ function makeCard(type) {
     const n = rint(2, 6);
     cd.n = n;
     cd.title = 'Hire ' + (Math.random() < .45 ? '' : n + ' ') + pick(ROLE);
-    cd.sub = '+' + n + ' headcount  ·  burn up';
+    cd.sub = '+' + n + ' headcount  ·  ships worth more  ·  burn up';
     cd.cost = (0.7 + n * 0.22) * cs;
     cd.life = rnd(4.5, 6.5);
   } else if (type === 'tweet') {
@@ -248,7 +248,7 @@ function makeCard(type) {
     cd.life = rnd(3.2, 4.6);
   } else if (type === 'pivot') {
     cd.title = 'Pivot: ' + pick(PIV_A) + ' ' + pick(PIV_B);
-    cd.sub = '-30% traction  ·  growth x1.3  ·  +hype';
+    cd.sub = '-28% traction  ·  ship value x1.2  ·  +hype';
     cd.cost = rnd(0.2, 0.5) * cs;
     cd.life = rnd(4.0, 5.5);
   } else if (type === 'raise') {
