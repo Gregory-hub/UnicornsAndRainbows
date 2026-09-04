@@ -1,0 +1,473 @@
+<!DOCTYPE html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no,viewport-fit=cover">
+<title>LAST UNICORN STANDING</title>
+<style>
+  html,body{margin:0;height:100%;background:#0a0714;overflow:hidden;touch-action:none;
+    -webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent}
+  canvas{display:block;width:100%;height:100%}
+</style>
+<canvas id=c></canvas>
+<script>
+'use strict';
+/* =====================================================================
+   LAST UNICORN STANDING -- js13k 2026 sandbox prototype
+   tiny arena joust. 7-stripe manes are your health bar. horn hits
+   knock the outermost stripe off. last mane standing wins.
+   ===================================================================== */
+
+const c = document.getElementById('c'), X = c.getContext('2d');
+let W = 0, H = 0, DPR = 1, SC = 1, OX = 0, OY = 0;
+const R = 300, TAU = Math.PI * 2, U = 1.7;   // arena radius, and how big a unicorn is in world units
+function resize(){
+  DPR = Math.min(devicePixelRatio || 1, 2);
+  W = innerWidth; H = innerHeight;
+  c.width = W * DPR | 0; c.height = H * DPR | 0;
+  X.setTransform(DPR, 0, 0, DPR, 0, 0);
+  SC = Math.min(W, H) / (R * 2 + 26);
+  OX = W / 2; OY = H / 2;
+}
+addEventListener('resize', resize); resize();
+
+const COL = ['#ff3b30','#ff9d00','#ffe100','#2ee65a','#2196ff','#5b5bff','#c44bff'];
+const BODY = ['#fdfbff','#ffc7dd','#bfe0ff','#c8ffcf'];
+const NAME = ['YOU','ROSE','SKY','MINT'];
+const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
+const SUDDEN = 35;
+
+/* ---------------- input ---------------------------------------------- */
+const keys = {};
+onkeydown = e => {
+  const k = e.key.toLowerCase();
+  keys[k] = 1;
+  if (k === ' ' || k.indexOf('arrow') === 0) e.preventDefault();
+  if (st !== 1) begin();
+};
+onkeyup = e => keys[e.key.toLowerCase()] = 0;
+
+let stick = null, chargeTouch = 0;
+function ptDown(e){
+  if (st !== 1) return;
+  if (e.clientX < W / 3) stick = { id: e.pointerId, ox: e.clientX, oy: e.clientY, x: e.clientX, y: e.clientY };
+  else chargeTouch++;
+}
+function ptMove(e){
+  if (stick && stick.id === e.pointerId){ stick.x = e.clientX; stick.y = e.clientY; }
+}
+function ptUp(e){
+  if (stick && stick.id === e.pointerId) stick = null;
+  else if (chargeTouch > 0) chargeTouch--;
+}
+c.addEventListener('pointerdown', ptDown);
+c.addEventListener('pointermove', ptMove);
+c.addEventListener('pointerup', ptUp);
+c.addEventListener('pointercancel', ptUp);
+
+// tilt steering: entirely optional, never throws, silently falls back to the stick
+let tiltOn = 0, tiltGot = 0, tx = 0, ty = 0;
+function onOri(e){
+  if (e.gamma == null || e.beta == null) return;
+  tiltGot = 1;
+  tx = clamp(e.gamma / 22, -1, 1);
+  ty = clamp((e.beta - 42) / 22, -1, 1);
+}
+function tiltToggle(){
+  if (tiltOn){ tiltOn = 0; tiltGot = 0; removeEventListener('deviceorientation', onOri); save(); return; }
+  const D = window.DeviceOrientationEvent;
+  if (!D) return;
+  try {
+    if (D.requestPermission)
+      D.requestPermission().then(s => { if (s === 'granted'){ addEventListener('deviceorientation', onOri); tiltOn = 1; save(); } }).catch(() => {});
+    else { addEventListener('deviceorientation', onOri); tiltOn = 1; save(); }
+  } catch (e){}
+}
+function moveIn(){
+  let x = 0, y = 0;
+  if (keys.a || keys.arrowleft) x -= 1;
+  if (keys.d || keys.arrowright) x += 1;
+  if (keys.w || keys.arrowup) y -= 1;
+  if (keys.s || keys.arrowdown) y += 1;
+  if (!x && !y && stick){
+    const dx = stick.x - stick.ox, dy = stick.y - stick.oy, m = Math.hypot(dx, dy);
+    if (m > 8){ const k = Math.min(m, 60) / m; x = dx * k / 60; y = dy * k / 60; }
+  }
+  if (!x && !y && tiltOn && tiltGot){ x = tx; y = ty; }
+  const m = Math.hypot(x, y);
+  return m > 1 ? [x/m, y/m, 1] : [x, y, m];
+}
+function chargeIn(){ return (keys[' '] || keys.shift || chargeTouch > 0) ? 1 : 0 }
+
+/* ---------------- state ---------------------------------------------- */
+let st = 0, us = [], parts = [], shake = 0, tt = 0, cd = 0, streak = 0, best = 0, msg = '', over = 0;
+let rt = 0, arena = R;   // after SUDDEN starts the rim closes in, so no round can stall out
+try { best = +(localStorage.getItem('last-unicorn-streak') || 0) || 0; } catch (e){}
+try { tiltOn = 0; } catch (e){}
+function save(){ try { localStorage.setItem('last-unicorn-streak', best); } catch (e){} }
+
+function mkUni(i){
+  const a = i / 4 * TAU + Math.PI / 4;
+  return {
+    i: i, ai: i > 0, x: Math.cos(a) * R * .62, y: Math.sin(a) * R * .62,
+    a: a + Math.PI, vx: 0, vy: 0, kx: 0, ky: 0, stun: 0,
+    str: 7, stam: 100, chg: 0, wind: 0, cool: 0,
+    inv: 0, dead: 0, flash: 0, wx: 0, wy: 0, wt: 0, sd: Math.random() < .5 ? 1 : -1
+  };
+}
+function begin(){
+  if (st === 2 && over < .8) return;          // don't rematch on the key that ended the round
+  us = [mkUni(0), mkUni(1), mkUni(2), mkUni(3)];
+  parts = []; shake = 0; cd = 1.6; msg = ''; over = 0; rt = 0; arena = R; stick = null; chargeTouch = 0; st = 1;
+}
+
+/* ---------------- geometry -------------------------------------------- */
+function segDist(px, py, x1, y1, x2, y2){
+  const dx = x2-x1, dy = y2-y1, L = dx*dx + dy*dy || 1;
+  const t = clamp(((px-x1)*dx + (py-y1)*dy) / L, 0, 1);
+  return Math.hypot(px - (x1+dx*t), py - (y1+dy*t));
+}
+function crs(o, a, b){ return (a[0]-o[0]) * (b[1]-o[1]) - (a[1]-o[1]) * (b[0]-o[0]) }
+function segCross(p1, p2, p3, p4){
+  const d1 = crs(p3,p4,p1), d2 = crs(p3,p4,p2), d3 = crs(p1,p2,p3), d4 = crs(p1,p2,p4);
+  return (d1 > 0) !== (d2 > 0) && (d3 > 0) !== (d4 > 0);
+}
+function horn(u){
+  const L = (u.chg === 2 ? 34 : 24) * U, cx = Math.cos(u.a), cy = Math.sin(u.a);
+  return [[u.x + cx * 9 * U, u.y + cy * 9 * U], [u.x + cx * L, u.y + cy * L]];
+}
+function burst(x, y, n, cols){
+  for (let i = 0; i < n; i++){
+    const a = Math.random() * TAU, s = 40 + Math.random() * 200;
+    parts.push({ x: x, y: y, vx: Math.cos(a)*s, vy: Math.sin(a)*s, l: .4 + Math.random()*.5,
+      c: cols[(Math.random() * cols.length) | 0] });
+  }
+}
+
+/* ---------------- simulation ------------------------------------------ */
+function hurt(d, k, kx, ky){
+  d.str--;
+  d.inv = .4; d.flash = .25; d.stun = .28;
+  d.kx += kx * 420; d.ky += ky * 420;
+  k.kx -= kx * 170; k.ky -= ky * 170; k.stun = .12;
+  k.chg = 0; k.cool = .3;
+  shake = Math.min(shake + 9, 16);
+  burst(d.x + kx * 12 * U, d.y + ky * 12 * U, 12, [COL[d.str], '#fff']);
+  if (d.str <= 0){
+    d.dead = 1;
+    burst(d.x, d.y, 34, COL);
+    shake = 18;
+  }
+}
+function ai(u, dt){
+  let tgt = null, bd = 1e9;
+  for (const o of us){
+    if (o === u || o.dead) continue;
+    const d = Math.hypot(o.x - u.x, o.y - u.y);
+    if (d < bd){ bd = d; tgt = o; }
+  }
+  // retarget on a timer even while seeking: flipping the flank side breaks up
+  // the endless circling that two evenly matched chasers fall into
+  u.wt -= dt;
+  if (u.wt <= 0){
+    const a = Math.random() * TAU, r = Math.random() * arena * .7;
+    u.wx = Math.cos(a) * r; u.wy = Math.sin(a) * r;
+    u.wt = 1.6 + Math.random() * 2; u.sd = -u.sd;
+  }
+  if (!tgt || bd > 330){
+    tgt = { x: u.wx, y: u.wy };
+    bd = Math.hypot(tgt.x - u.x, tgt.y - u.y);
+  }
+  // lead the target a little so a dash actually arrives where they will be
+  const lead = Math.min(bd / 400, .5);
+  let ax = tgt.x + (tgt.vx || 0) * lead - u.x, ay = tgt.y + (tgt.vy || 0) * lead - u.y;
+  if (bd < 210 && bd > 90 && u.chg !== 2){ // swing wide, aim for a flank instead of a head-on clash
+    const m = Math.hypot(ax, ay) || 1, px = -ay / m * 34 * u.sd, py = ax / m * 34 * u.sd;
+    ax += px; ay += py;
+  }
+  // peel away from the rim instead of grinding along it
+  const rim = Math.hypot(u.x, u.y);
+  if (rim > arena * .88 && u.chg !== 2){
+    const k = (rim - arena * .88) / (arena * .12);
+    ax -= u.x / rim * 260 * k; ay -= u.y / rim * 260 * k;
+  }
+  let da = Math.atan2(ay, ax) - u.a;
+  while (da > Math.PI) da -= TAU;
+  while (da < -Math.PI) da += TAU;
+  const want = Math.atan2(ay, ax) + (u.chg ? 0 : Math.sin(tt * 1.3 + u.i) * .2);
+  const go = Math.abs(da) < .55 && bd > 50 && bd < 300 && u.stam > 40 && u.cool <= 0 && Math.random() < .12;
+  const hold = u.chg === 2 ? (u.stam > 45 ? 1 : 0) : u.chg === 1 ? 1 : go ? 1 : 0;
+  return [Math.cos(want), Math.sin(want), 1, hold];
+}
+function update(dt){
+  tt += dt;
+  for (let i = parts.length - 1; i >= 0; i--){
+    const p = parts[i];
+    p.x += p.vx * dt; p.y += p.vy * dt; p.vx *= .94; p.vy *= .94; p.l -= dt;
+    if (p.l <= 0) parts.splice(i, 1);
+  }
+  if (shake > 0) shake = Math.max(0, shake - dt * 42);
+  if (st !== 1) return;
+  if (cd > 0){ cd -= dt; return; }
+  rt += dt;
+  arena = Math.max(115, R - Math.max(0, rt - SUDDEN) * 26);
+
+  for (const u of us){
+    if (u.dead) continue;
+    const inp = u.ai ? ai(u, dt) : moveIn().concat([chargeIn()]);
+    const wantChg = inp[3];
+    u.inv = Math.max(0, u.inv - dt);
+    u.flash = Math.max(0, u.flash - dt);
+    u.cool = Math.max(0, u.cool - dt);
+    // charge state machine: windup -> dash, gated by stamina
+    if (wantChg && !u.chg && u.cool <= 0 && u.stam > 25){ u.chg = 1; u.wind = .22; }
+    if (u.chg === 1){
+      u.wind -= dt;
+      if (!wantChg){ u.chg = 0; u.cool = .15; }
+      else if (u.wind <= 0) u.chg = 2;
+    } else if (u.chg === 2){
+      u.stam -= 55 * dt;
+      if (!wantChg || u.stam <= 0){ u.chg = 0; u.cool = .35; }
+    }
+    if (!u.chg) u.stam = Math.min(100, u.stam + 28 * dt);
+    if (u.stun > 0){ u.stun = Math.max(0, u.stun - dt); u.chg = 0; }
+    // steering: turn toward the input direction, slower while committed to a dash
+    const im = inp[2];
+    if (im > .05 && u.stun <= 0){
+      let da = Math.atan2(inp[1], inp[0]) - u.a;
+      while (da > Math.PI) da -= TAU;
+      while (da < -Math.PI) da += TAU;
+      const rate = (u.chg === 2 ? 2.2 : u.ai ? 4.2 : 6) * dt;
+      u.a += clamp(da, -rate, rate);
+    }
+    const tgtSp = u.stun > 0 ? 0 : u.chg === 2 ? 400 : u.chg === 1 ? 55 : im > .05 ? 165 * im : 0;
+    let sp = Math.hypot(u.vx, u.vy);
+    sp += (tgtSp - sp) * (1 - Math.exp(-(u.chg === 2 ? 9 : 5) * dt));
+    const g = 1 - Math.exp(-(u.chg === 2 ? 12 : 7) * dt), vm = Math.hypot(u.vx, u.vy) || 1;
+    let nx = u.vx / vm + (Math.cos(u.a) - u.vx / vm) * g;
+    let ny = u.vy / vm + (Math.sin(u.a) - u.vy / vm) * g;
+    const nm = Math.hypot(nx, ny) || 1;
+    u.vx = nx / nm * sp; u.vy = ny / nm * sp;
+    // knockback rides on top of the drive velocity and decays on its own
+    const kd = Math.exp(-4.5 * dt);
+    u.x += (u.vx + u.kx) * dt; u.y += (u.vy + u.ky) * dt;
+    u.kx *= kd; u.ky *= kd;
+    if (u.chg === 2 && Math.random() < .5)
+      parts.push({ x: u.x - Math.cos(u.a)*8*U, y: u.y - Math.sin(u.a)*8*U, vx: (Math.random()-.5)*40,
+        vy: (Math.random()-.5)*40, l: .3, c: COL[(Math.random()*7)|0] });
+    // rim: bounce, never death
+    const d = Math.hypot(u.x, u.y);
+    if (d > arena - 13 * U){
+      const nx2 = u.x / d, ny2 = u.y / d;
+      u.x = nx2 * (arena - 13 * U); u.y = ny2 * (arena - 13 * U);
+      const dot = u.vx * nx2 + u.vy * ny2, kdot = u.kx * nx2 + u.ky * ny2;
+      u.vx = (u.vx - 2 * dot * nx2) * .55; u.vy = (u.vy - 2 * dot * ny2) * .55;
+      if (kdot > 0){ u.kx = (u.kx - 2 * kdot * nx2) * .5; u.ky = (u.ky - 2 * kdot * ny2) * .5; }
+      u.a = Math.atan2(u.vy, u.vx);
+      if (u.chg === 2){ u.chg = 0; u.cool = .3; }
+    }
+  }
+  // combat: horn vs horn parries, horn vs body takes a stripe
+  for (let i = 0; i < us.length; i++) for (let j = i + 1; j < us.length; j++){
+    const A = us[i], B = us[j];
+    if (A.dead || B.dead) continue;
+    const ha = horn(A), hb = horn(B);
+    const dx = B.x - A.x, dy = B.y - A.y, dd = Math.hypot(dx, dy) || 1;
+    const hornGap = Math.min(
+      segDist(ha[1][0], ha[1][1], hb[0][0], hb[0][1], hb[1][0], hb[1][1]),
+      segDist(hb[1][0], hb[1][1], ha[0][0], ha[0][1], ha[1][0], ha[1][1]));
+    const opposed = Math.cos(A.a) * Math.cos(B.a) + Math.sin(A.a) * Math.sin(B.a) < -.2;
+    if ((segCross(ha[0], ha[1], hb[0], hb[1]) || hornGap < 10) && opposed && (A.chg === 2 || B.chg === 2)){
+      // parry: sparks and shove, nobody loses a stripe
+      A.kx -= dx/dd * 300; A.ky -= dy/dd * 300; A.stun = .18;
+      B.kx += dx/dd * 300; B.ky += dy/dd * 300; B.stun = .18;
+      A.chg = B.chg = 0; A.cool = B.cool = .35;
+      burst((ha[1][0]+hb[1][0])/2, (ha[1][1]+hb[1][1])/2, 10, ['#fff','#ffe100']);
+      shake = Math.min(shake + 7, 14);
+      continue;
+    }
+    if (A.chg === 2 && B.inv <= 0 && segDist(B.x, B.y, ha[0][0], ha[0][1], ha[1][0], ha[1][1]) < 13.5 * U)
+      hurt(B, A, dx/dd, dy/dd);
+    else if (B.chg === 2 && A.inv <= 0 && segDist(A.x, A.y, hb[0][0], hb[0][1], hb[1][0], hb[1][1]) < 13.5 * U)
+      hurt(A, B, -dx/dd, -dy/dd);
+    if (dd < 19 * U){ // bodies never overlap
+      const p = (19 * U - dd) / 2;
+      A.x -= dx/dd*p; A.y -= dy/dd*p; B.x += dx/dd*p; B.y += dy/dd*p;
+    }
+  }
+  const alive = us.filter(u => !u.dead);
+  if (alive.length <= 1) endRound(alive[0], '');
+  else if (rt > 75){                      // hard stop: fullest mane takes it
+    let w = alive[0];
+    for (const u of alive) if (u.str > w.str) w = u;
+    endRound(w, 'TIME — ');
+  }
+}
+function endRound(win, pre){
+  st = 2;
+  if (win && !win.ai){
+    streak++;
+    if (streak > best){ best = streak; save(); }
+    msg = pre ? 'TIME — YOU WIN ON MANE' : 'LAST UNICORN STANDING';
+  } else {
+    streak = 0;
+    msg = win ? pre + NAME[win.i] + ' WINS' : 'EVERYONE FELL';
+  }
+}
+
+/* ---------------- drawing --------------------------------------------- */
+function drawUni(u){
+  if (u.dead) return;
+  X.save();
+  X.translate(u.x, u.y);
+  if (u.inv > 0 && ((u.inv * 20) | 0) % 2) X.globalAlpha = .35;
+  X.scale(U, U);
+  X.fillStyle = u.ai ? '#00000055' : '#ffffff44';
+  X.beginPath(); X.ellipse(0, 6, 15, 7, 0, 0, TAU); X.fill();
+  if (u.chg){
+    const a0 = X.globalAlpha;
+    const w = u.chg === 2 ? 1 : (.22 - u.wind) / .22;
+    X.globalAlpha = a0 * (.25 + w * .55);
+    X.strokeStyle = '#fff'; X.lineWidth = 2 + w * 2;
+    X.beginPath(); X.arc(0, 0, 15 + w * 9, 0, TAU); X.stroke();
+    X.globalAlpha = a0 * .12; X.fillStyle = '#fff'; X.fill();
+    X.globalAlpha = a0;
+  }
+  X.rotate(u.a);
+  // tail streams out behind, same rainbow as the mane
+  for (let i = 0; i < u.str; i++){
+    X.strokeStyle = COL[i]; X.lineWidth = 2;
+    X.beginPath();
+    X.moveTo(-12, 0);
+    X.lineTo(-20 - Math.sin(tt * 8 + i) * 2, (i - 3) * 2.4);
+    X.stroke();
+  }
+  X.fillStyle = u.flash > 0 ? '#ff5a5a' : BODY[u.i];
+  X.beginPath(); X.ellipse(0, 0, 13, 8, 0, 0, TAU); X.fill();
+  X.beginPath(); X.ellipse(9, 0, 6, 5.5, 0, 0, TAU); X.fill();
+  // mane: one band across the back per remaining stripe, violet end drops first
+  for (let i = 0; i < u.str; i++){
+    const bx = 2 - i * 2.3, h = 5.6 - Math.abs(i - 3) * .5;
+    X.strokeStyle = COL[i]; X.lineWidth = 2.2;
+    X.beginPath(); X.moveTo(bx, -h); X.lineTo(bx, h); X.stroke();
+  }
+  X.fillStyle = '#221a33';
+  X.beginPath(); X.arc(11, -3, 1.2, 0, TAU); X.arc(11, 3, 1.2, 0, TAU); X.fill();
+  const hl = u.chg === 2 ? 34 : 24;
+  X.fillStyle = u.chg ? '#fff' : '#ffe9a8';
+  X.beginPath(); X.moveTo(12, -3); X.lineTo(hl, 0); X.lineTo(12, 3); X.closePath(); X.fill();
+  X.restore();
+}
+function ring(){
+  const A = st === 1 ? arena : R;
+  X.fillStyle = '#140f26';
+  X.beginPath(); X.arc(0, 0, A, 0, TAU); X.fill();
+  X.strokeStyle = '#ffffff0d'; X.lineWidth = 1;
+  for (let i = 1; i < 4; i++){ X.beginPath(); X.arc(0, 0, A * i / 4, 0, TAU); X.stroke(); }
+  X.lineWidth = 10; X.globalAlpha = .45;
+  for (let i = 0; i < 7; i++){
+    X.strokeStyle = COL[i];
+    X.beginPath(); X.arc(0, 0, A - 5, i / 7 * TAU, (i + 1) / 7 * TAU + .03); X.stroke();
+  }
+  X.globalAlpha = 1;
+}
+// pick the biggest font size that still fits the width -- phones are narrow
+function fit(txt, max, size){
+  do { X.font = '700 ' + size + 'px system-ui,sans-serif'; size -= 1; }
+  while (size > 10 && X.measureText(txt).width > max);
+}
+function bar(x, y, w, h, v, col){
+  X.fillStyle = '#ffffff22'; X.fillRect(x, y, w, h);
+  X.fillStyle = col; X.fillRect(x, y, w * clamp(v, 0, 1), h);
+}
+function draw(){
+  X.fillStyle = '#0a0714'; X.fillRect(0, 0, W, H);
+  X.save();
+  X.translate(OX + (Math.random()-.5) * shake, OY + (Math.random()-.5) * shake);
+  X.scale(SC, SC);
+  ring();
+  for (const p of parts){
+    X.globalAlpha = clamp(p.l * 2, 0, 1); X.fillStyle = p.c;
+    X.fillRect(p.x - 2, p.y - 2, 4, 4);
+  }
+  X.globalAlpha = 1;
+  for (const u of us) drawUni(u);
+  X.restore();
+  X.textAlign = 'center';
+  if (st === 0){
+    X.fillStyle = '#fff'; fit('LAST UNICORN', W - 50, 46);
+    X.fillText('LAST UNICORN', W/2, H/2 - 46);
+    fit('STANDING', W - 50, 46);
+    let g = X.createLinearGradient(W/2 - 160, 0, W/2 + 160, 0);
+    for (let i = 0; i < 7; i++) g.addColorStop(i / 6, COL[i]);
+    X.fillStyle = g; X.fillText('STANDING', W/2, H/2);
+    X.fillStyle = '#a8a4c8'; X.font = '14px system-ui,sans-serif';
+    X.font = Math.min(14, W / 30) + 'px system-ui,sans-serif';
+    X.fillText('WASD / arrows to steer  ·  hold SPACE to charge', W/2, H/2 + 40);
+    X.fillText('mobile: stick on the left, hold right to charge', W/2, H/2 + 60);
+    X.fillStyle = '#fff'; X.font = '600 18px system-ui,sans-serif';
+    X.fillText(((tt * 2 | 0) % 2) ? 'TAP OR PRESS ANY KEY' : ' ', W/2, H/2 + 108);
+    if (best) { X.fillStyle = '#77749a'; X.font = '13px system-ui,sans-serif'; X.fillText('best streak ' + best, W/2, H/2 + 140); }
+    // tilt toggle
+    X.fillStyle = tiltOn ? '#2ee65a' : '#ffffff18';
+    X.fillRect(W/2 - 60, H - 70, 120, 34);
+    X.fillStyle = tiltOn ? '#06210d' : '#a8a4c8'; X.font = '600 12px system-ui,sans-serif';
+    X.fillText('TILT ' + (tiltOn ? 'ON' : 'OFF'), W/2, H - 48);
+  } else if (st === 1){
+    const me = us[0];
+    X.textAlign = 'left';
+    for (const u of us){
+      const y = 24 + u.i * 22;
+      X.fillStyle = u.dead ? '#4a4666' : BODY[u.i];
+      X.font = '600 12px system-ui,sans-serif';
+      X.fillText(NAME[u.i], 16, y + 10);
+      for (let i = 0; i < 7; i++){
+        X.fillStyle = u.dead || i >= u.str ? '#ffffff14' : COL[i];
+        X.fillRect(62 + i * 11, y, 8, 11);
+      }
+    }
+    if (!me.dead){
+      bar(16, H - 30, Math.min(220, W - 32), 10, me.stam / 100, me.stam > 25 ? '#2ee65a' : '#ff9d00');
+      X.fillStyle = '#77749a'; X.font = '10px system-ui,sans-serif';
+      X.fillText('STAMINA', 16, H - 36);
+    }
+    if (cd > 0){
+      X.textAlign = 'center'; X.fillStyle = '#fff'; X.font = '700 54px system-ui,sans-serif';
+      X.fillText(cd > .4 ? 'READY' : 'GO!', W/2, H/2 - 60);
+    } else if (rt > SUDDEN){
+      X.textAlign = 'center'; X.fillStyle = '#ff9d00'; X.font = '700 15px system-ui,sans-serif';
+      X.fillText('THE RING IS CLOSING', W/2, 26);
+    }
+    if (stick){
+      X.strokeStyle = '#ffffff33'; X.lineWidth = 2;
+      X.beginPath(); X.arc(stick.ox, stick.oy, 44, 0, TAU); X.stroke();
+      const dx = clamp(stick.x - stick.ox, -44, 44), dy = clamp(stick.y - stick.oy, -44, 44);
+      X.fillStyle = '#ffffff55';
+      X.beginPath(); X.arc(stick.ox + dx, stick.oy + dy, 18, 0, TAU); X.fill();
+    }
+  } else {
+    X.fillStyle = '#000a'; X.fillRect(0, H/2 - 90, W, 180);
+    X.fillStyle = '#fff'; fit(msg, W - 40, 34);
+    X.fillText(msg, W/2, H/2 - 20);
+    X.fillStyle = '#a8a4c8'; X.font = '14px system-ui,sans-serif';
+    X.fillText(streak ? 'win streak ' + streak + (best > streak ? '  ·  best ' + best : '') : (best ? 'best streak ' + best : ''), W/2, H/2 + 10);
+    X.fillStyle = '#fff'; X.font = '600 16px system-ui,sans-serif';
+    if ((tt * 2 | 0) % 2) X.fillText('TAP OR PRESS ANY KEY TO REMATCH', W/2, H/2 + 50);
+  }
+}
+
+/* ---------------- loop ------------------------------------------------ */
+c.addEventListener('pointerup', e => {
+  if (st === 0 && Math.abs(e.clientX - W/2) < 60 && e.clientY > H - 70 && e.clientY < H - 36){ tiltToggle(); return; }
+  if (st !== 1) begin();
+});
+let last = 0;
+requestAnimationFrame(function loop(now){
+  requestAnimationFrame(loop);
+  const dt = Math.min((now - last) / 1000, .05);
+  last = now;
+  if (st === 2){ over += dt; }
+  update(dt);
+  draw();
+});
+</script>
+</html>

@@ -10,11 +10,11 @@
 <canvas id=c></canvas>
 <script>
 "use strict";
-/* ============================================================
+/*
    CHROMATIC  —  the world is grey and you fall straight through it.
    Colour is solidity. Your rainbow trail is the only floor there is,
    and it is dying behind you.
-   ============================================================ */
+*/
 
 const c = document.getElementById('c');
 const X = c.getContext('2d');
@@ -153,7 +153,7 @@ let tideY = 0, tideSpd = 0, dangerT = 0;
 let hueAcc = 0;
 
 const P = { x: 0, y: 0, vx: 0, vy: 0, on: 0, nx: 0, ny: -1, face: 1, dashT: 0, ch: 2, chMax: 2,
-            coyote: 0, buf: 0, gallop: 0, air: 0, alive: 1, sq: 0, saved: 0 };
+            coyote: 0, buf: 0, gallop: 0, air: 0, sq: 0, saved: 0 };
 const cam = { x: 0, y: 0, sx: 0, sy: 0 };
 
 const TP = [];       // trail points {x,y,b,h,a,k}
@@ -176,9 +176,9 @@ function burst(x, y, n, hue, spd, type, spread){
   }
 }
 
-/* ============================================================
+/*
    PROCEDURAL WORLD  —  parallax layers of chunked grey scenery
-   ============================================================ */
+*/
 function makeLayer(seed, p, gen){ return { seed, p, cache: new Map(), gen }; }
 function layerChunks(L, cy){
   const pad = H * 0.75 + CHUNK;
@@ -241,9 +241,9 @@ function resetWorld(){
 const wallL = y => -WALLX - vnoise(y, 3) * 240 - vnoise(y * 0.31, 11) * 120;
 const wallR = y =>  WALLX + vnoise(y, 17) * 240 + vnoise(y * 0.29, 5) * 120;
 
-/* ============================================================
+/*
    TRAIL
-   ============================================================ */
+*/
 function trailLife(){ return state === 'play' ? Math.max(LIFE1, LIFE0 - runTime * 0.022) : LIFE0; }
 function addPoint(x, y, dist){
   hueAcc += dist * 0.5 + 6;
@@ -283,9 +283,9 @@ function segClosest(px, py, ax, ay, bx, by){
   return ex * ex + ey * ey;
 }
 
-/* ============================================================
+/*
    ACTIONS
-   ============================================================ */
+*/
 function pressJump(){
   if (state !== 'play') return;
   P.buf = 0.13;
@@ -326,9 +326,9 @@ function keyDash(){
   dashDir(ix * 0.85, -0.9);
 }
 
-/* ============================================================
+/*
    LIFE CYCLE
-   ============================================================ */
+*/
 function start(){
   state = 'play';
   T = 0; runTime = 0; score = 0; gems = 0; maxAlt = 0;
@@ -362,9 +362,9 @@ function win(){
   SFX.win();
 }
 
-/* ============================================================
+/*
    UPDATE
-   ============================================================ */
+*/
 function step(dt){
   runTime += dt; T += dt;
 
@@ -511,7 +511,6 @@ function step(dt){
   tideY -= tideSpd * dt;
   const leash = P.y + 2100;
   if (tideY > leash) tideY = Math.max(leash, tideY - 420 * dt);
-  if (tideY < P.y + 380) { tideSpd *= 1; }
   dangerT = clamp(1 - (tideY - P.y) / 620, 0, 1);
   if (dangerT > 0.05 && Math.random() < dangerT * 0.6) part(P.x + rnd(-W / 2, W / 2), tideY + rnd(0, 60), rnd(-20, 20), rnd(-90, -30), rnd(0.7, 1.6), -1, rnd(1, 3), 3, 0);
   for (let i = 0; i < 2; i++) part(rnd(cam.x - W / 2, cam.x + W / 2), tideY + rnd(0, 40), rnd(-14, 14), rnd(-70, -20), rnd(0.8, 1.8), -1, rnd(1, 3.2), 3, 0);
@@ -540,9 +539,9 @@ function stepParticles(dt){
   }
 }
 
-/* ============================================================
+/*
    DRAW
-   ============================================================ */
+*/
 function bg(){
   const g = X.createLinearGradient(0, 0, 0, H);
   const d = dangerT;
@@ -869,24 +868,22 @@ function drawTide(){
   g.addColorStop(0.12, 'rgba(150,152,168,0.30)');
   g.addColorStop(0.45, 'rgba(58,59,70,0.86)');
   g.addColorStop(1, 'rgba(12,12,16,0.99)');
-  X.fillStyle = g;
-  X.beginPath();
-  X.moveTo(-10, H + 40);
+  const crest = [];
   for (let sx = -10; sx <= W + 10; sx += 14){
     const wx = sx + cam.x;
-    const off = Math.sin(wx * 0.008 + anim * 1.3) * 9 + Math.sin(wx * 0.021 - anim * 2.1) * 5 + Math.sin(wx * 0.05 + anim * 3) * 2.5;
-    X.lineTo(sx, ty + off);
+    crest.push(sx, ty + Math.sin(wx * 0.008 + anim * 1.3) * 9
+                    + Math.sin(wx * 0.021 - anim * 2.1) * 5
+                    + Math.sin(wx * 0.05 + anim * 3) * 2.5);
   }
+  X.fillStyle = g;
+  X.beginPath(); X.moveTo(-10, H + 40);
+  for (let i = 0; i < crest.length; i += 2) X.lineTo(crest[i], crest[i + 1]);
   X.lineTo(W + 10, H + 40); X.closePath(); X.fill();
 
   X.globalCompositeOperation = 'lighter';
   X.strokeStyle = 'rgba(200,202,216,0.30)'; X.lineWidth = 1.6;
-  X.beginPath();
-  for (let sx = -10; sx <= W + 10; sx += 14){
-    const wx = sx + cam.x;
-    const off = Math.sin(wx * 0.008 + anim * 1.3) * 9 + Math.sin(wx * 0.021 - anim * 2.1) * 5 + Math.sin(wx * 0.05 + anim * 3) * 2.5;
-    if (sx < 0) X.moveTo(sx, ty + off); else X.lineTo(sx, ty + off);
-  }
+  X.beginPath(); X.moveTo(crest[0], crest[1]);
+  for (let i = 2; i < crest.length; i += 2) X.lineTo(crest[i], crest[i + 1]);
   X.stroke();
   X.restore();
 }
@@ -1027,9 +1024,9 @@ function draw(){
   hud();
 }
 
-/* ============================================================
+/*
    LOOP
-   ============================================================ */
+*/
 let last = performance.now();
 function frame(now){
   requestAnimationFrame(frame);
